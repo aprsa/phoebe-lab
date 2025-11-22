@@ -1,0 +1,4 @@
+nicegui>=1.4.0
+numpy>=1.26.0
+plotly>=5.18.0
+phoebe-client>=0.1.0

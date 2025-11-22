@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phoebe-lab"
+version = "0.1.0"
+description = "NiceGUI-based web UI for PHOEBE Lab to inspect and fit eclipsing-binary models"
+authors = [
+    {name = "Andrej Prša", email = "aprsa@villanova.edu"}
+]
+license = {text = "AGPL-3.0"}
+readme = "README.md"
+requires-python = ">=3.12"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+dependencies = [
+    "nicegui>=1.4.0",
+    "numpy>=1.26.0",
+    "plotly>=5.18.0",
+    "phoebe-client>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.7.0",
+]
+
+[project.scripts]
+phoebe-lab = "lab.phoebe_ui:main"
+
+[project.urls]
+Homepage = "https://github.com/aprsa/phoebe.lab"
+Repository = "https://github.com/aprsa/phoebe.lab"
+Issues = "https://github.com/aprsa/phoebe.lab/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lab*"]
+
+[tool.black]
+line-length = 120
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by black)
+]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = true
