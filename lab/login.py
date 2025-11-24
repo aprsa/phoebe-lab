@@ -10,7 +10,7 @@ class Login:
     with callback-based event handling.
     """
 
-    def __init__(self, on_login_completed, existing_session_id: str | None = None, existing_user: User | None = None):
+    def __init__(self, on_login_completed, existing_session_id: str | None = None, existing_user: User | None = None, existing_project_name: str | None = None):
         """
         Initialize Login manager.
 
@@ -18,10 +18,12 @@ class Login:
             on_login_completed: Function to call with User object when login is complete
             existing_session_id: ID of an existing session, if any
             existing_user: User object for the logged-in user, if any
+            existing_project_name: Project name for the existing session, if any
         """
 
         self.user = existing_user
         self.session_id = existing_session_id
+        self.project_name = existing_project_name or "My Binary System"
         self.on_login_completed = on_login_completed
 
         ui.add_css('/static/styles.css')
@@ -56,7 +58,8 @@ class Login:
                     'email': self.user.email,
                     'timestamp': self.user.timestamp,
                     'session_id': self.session_id,
-                    'display': f'{self.user.timestamp}'
+                    'project_name': self.project_name,
+                    'display': f'{self.project_name}'
                 }]
 
                 # Currently single session, but dropdown ready for multiple
@@ -85,6 +88,7 @@ class Login:
                         meta = next((s for s in self.sessions_data if s['session_id'] == selected_id), None)
                         if meta:
                             with self.metadata_display:
+                                ui.label(f"Project: {meta.get('project_name', 'My Binary System')}").classes('text-sm text-gray-700 font-semibold')
                                 ui.label(f"Owner: {meta['first_name']} {meta['last_name']}").classes('text-sm text-gray-700')
                                 if meta.get('email'):
                                     ui.label(f"Email: {meta['email']}").classes('text-sm text-gray-700')
@@ -121,6 +125,12 @@ class Login:
             ui.label('Please register below to begin').classes('text-gray-600 mb-6')
 
             with ui.column().classes('w-full gap-4'):
+                self.project_name_input = ui.input(
+                    'System/Project Name',
+                    placeholder='Enter a name for your binary system',
+                    value='My Binary System'
+                ).classes('w-full').props('outlined')
+
                 self.first_name_input = ui.input(
                     'First Name',
                     placeholder='Enter your first name'
@@ -151,9 +161,13 @@ class Login:
 
     def on_continue_session(self):
         """Handle continue session button click."""
+        # Get selected session metadata
+        selected_id = self.session_select.value
+        selected_session = next((s for s in self.sessions_data if s['session_id'] == selected_id), None)
+        project_name = selected_session.get('project_name', 'My Binary System') if selected_session else 'My Binary System'
 
         self.dialog.close()
-        self.on_login_completed(user=self.user, session_id=self.session_select.value)
+        self.on_login_completed(user=self.user, session_id=self.session_select.value, project_name=project_name)
 
     def on_start_new_session(self):
         """Handle start new session button click."""
@@ -184,7 +198,10 @@ class Login:
             email=email
         )
 
-        self.on_login_completed(user=self.user, session_id=None)
+        # Get project name
+        project_name = self.project_name_input.value.strip() or "My Binary System"
+
+        self.on_login_completed(user=self.user, session_id=None, project_name=project_name)
         self.dialog.close()
 
         return True

@@ -64,7 +64,7 @@ class PhoebeParameterWidget:
         if response['success']:
             self.set_sensitive(not response['result'])
 
-        self.widget.on('update:model-value', self.on_value_changed)
+        self.widget.on('change', self.on_value_changed)
 
     def _widget_layout(self, par, value, label, format, classes):
         """Create and return the widget based on parameter type. Override in derived classes."""
@@ -78,6 +78,12 @@ class PhoebeParameterWidget:
                 max=self.limits[1],
                 step=float(10**(order_of_mag-2))
             ).classes('flex-1 min-w-0')
+
+        elif par['Class'] == 'StringParameter':
+            return ui.input(
+                label=label,
+                value=value
+            ).classes(classes)
 
         elif par['Class'] == 'ChoiceParameter':
             return ui.select(
@@ -935,17 +941,32 @@ class PhoebeUI:
     def create_parameter_panel(self):
         # Load/Save buttons
         with ui.row().classes('w-full gap-2 mb-4'):
+            self.new_button = ui.button(
+                'New',
+                icon='note_add',
+                on_click=self.on_new_model
+            ).classes('flex-1 bg-gray-600 text-white')
+
             self.load_button = ui.button(
-                'Load Model',
+                'Load',
                 icon='file_upload',
                 on_click=self.on_load_model
             ).classes('flex-1 bg-blue-600 text-white')
 
             self.save_button = ui.button(
-                'Save Model',
+                'Save',
                 icon='file_download',
                 on_click=self.on_save_model
             ).classes('flex-1 bg-green-600 text-white')
+
+        # Target/project name:
+        self.parameters['project_name@ui'] = PhoebeParameterWidget(
+            qualifier='project_name',
+            context='ui',
+            label='System/Project Name',
+            client=self.client,
+            classes='w-full mb-4'
+        )
 
         # Model selection
         self.parameters['backend@ui'] = PhoebeParameterWidget(
@@ -1691,6 +1712,45 @@ class PhoebeUI:
         except Exception as e:
             ui.notify(f'Error adopting solver solution: {str(e)}', type='negative')
 
+    async def on_new_model(self):
+        """Create a new model after confirming with the user."""
+        # Create a dialog to warn about unsaved changes
+        with ui.dialog() as dialog, ui.card():
+            ui.label('New Model').classes('text-h6')
+            ui.label('Warning: Creating a new model will discard any unsaved changes to the current model.').classes('text-orange-600 mb-4')
+
+            with ui.row().classes('w-full justify-end gap-2 mt-4'):
+                ui.button('Cancel', on_click=dialog.close).props('flat')
+                ui.button('Create New Model', on_click=lambda e: self.create_new_model(dialog)).classes('bg-red-600 text-white')
+
+        dialog.open()
+
+    async def create_new_model(self, dialog):
+        """Create a new model in the backend and sync UI."""
+        try:
+            # Show loading indicator
+            self.new_button.props('loading')
+
+            response = await get_event_loop().run_in_executor(
+                None,
+                lambda: self.client.new_bundle()
+            )
+
+            if response.get('success', False):
+                ui.notify('New model created successfully', type='positive')
+                dialog.close()
+
+                # Sync UI state with the new model
+                self.sync_ui_state()
+            else:
+                ui.notify(f"Failed to create new model: {response.get('error', 'Unknown error')}", type='negative')
+
+        except Exception as e:
+            ui.notify(f'Error creating new model: {str(e)}', type='negative')
+
+        finally:
+            self.new_button.props(remove='loading')
+
     async def on_load_model(self):
         """Load model from file with browser upload and confirmation dialog."""
         # Create a dialog to warn about unsaved changes and upload file
@@ -1795,6 +1855,13 @@ class PhoebeUI:
 def attach_ui_parameters(phoebe_client: PhoebeClient, backend=None, morphology=None, phase_min=None, phase_max=None, phase_length=None):
     parameters = [
         {
+            'ptype': 'string',
+            'qualifier': 'project_name',
+            'value': 'My Binary System',
+            'description': 'Name of the binary system / project',
+            'context': 'ui'
+        },
+        {
             'ptype': 'choice',
             'qualifier': 'backend',
             'value': backend or 'PHOEBE',
@@ -1852,6 +1919,7 @@ def main_page():
     # Check for existing session in storage
     existing_session_id = app.storage.user.get('session_id')
     existing_user = app.storage.user.get('user')
+    existing_project_name = app.storage.user.get('project_name', 'My Binary System')
 
     if existing_session_id and existing_user:
         existing_user = User.from_dict(existing_user)
@@ -1863,46 +1931,64 @@ def main_page():
         if existing_session_id not in active_sessions:
             existing_session_id = None
             existing_user = None
+            existing_project_name = None
             app.storage.user.clear()
     else:
         # Clear incomplete session data
         existing_session_id = None
         existing_user = None
+        existing_project_name = None
 
     main_container = ui.column().classes('w-full h-full items-center justify-start p-4 gap-4')
 
-    def on_login_completed(user: User, session_id: str | None = None):
+    def on_login_completed(user: User, session_id: str | None = None, project_name: str = "My Binary System"):
         """Handle login completion and create main UI."""
 
         if session_id is None:
             # no existing session -- start a new one:
-            session = phoebe_client.start_session(metadata=user.to_dict())
+            metadata = user.to_dict()
+            metadata['project_name'] = project_name
+            session = phoebe_client.start_session(metadata=metadata)
             attach_ui_parameters(phoebe_client)
 
-            # Store user and session_id in storage
+            # Set project name parameter value
+            phoebe_client.set_value(twig='project_name@ui', value=project_name)
+
+            # Store user, session_id, and project_name in storage
             app.storage.user['user'] = user.to_dict()
             app.storage.user['session_id'] = session.get('session_id')
             app.storage.user['port'] = session.get('port')
+            app.storage.user['project_name'] = project_name
             reconnect = False
         else:
             session = phoebe_client.get_sessions()[session_id]
+            # Get project_name from server (server is source of truth)
+            project_name = session.get('project_name', project_name or 'My Binary System')
+            # Update local storage cache with server value
+            app.storage.user['project_name'] = project_name
             reconnect = True
 
         # Create main UI
         main_container.clear()
 
         with main_container:
-            PhoebeUI(
+            ui_instance = PhoebeUI(
                 phoebe_client=phoebe_client,
                 user=user,
                 session_id=session.get('session_id'),
                 reconnect=reconnect
             )
 
+            # Set project name parameter on reconnect
+            if reconnect and project_name:
+                ui_instance.parameters['project_name@ui'].set_value(project_name)
+                ui_instance.parameters['project_name@ui'].on_value_changed(event=False)
+
     Login(
         on_login_completed=on_login_completed,
         existing_session_id=existing_session_id,
-        existing_user=existing_user
+        existing_user=existing_user,
+        existing_project_name=existing_project_name
     )
 
 
