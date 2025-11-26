@@ -10,26 +10,24 @@ class Login:
     with callback-based event handling.
     """
 
-    def __init__(self, on_login_completed, existing_session_id: str | None = None, existing_user: User | None = None, existing_project_name: str | None = None):
+    def __init__(self, client, on_login_completed, existing_sessions: dict = {}):
         """
         Initialize Login manager.
 
         Args:
             on_login_completed: Function to call with User object when login is complete
-            existing_session_id: ID of an existing session, if any
-            existing_user: User object for the logged-in user, if any
-            existing_project_name: Project name for the existing session, if any
+            existing_sessions: Dict with session_id keys and metadata values
         """
 
-        self.user = existing_user
-        self.session_id = existing_session_id
-        self.project_name = existing_project_name or "My Binary System"
+        self.client = client
+
+        self.existing_sessions = existing_sessions
         self.on_login_completed = on_login_completed
 
         ui.add_css('/static/styles.css')
         self.dialog = ui.dialog()
 
-        if self.session_id and self.user:
+        if self.existing_sessions:
             self.create_existing_session_dialog()
         else:
             self.create_new_session_dialog()
@@ -39,39 +37,45 @@ class Login:
         Create dialog for handling existing session reconnection.
         """
 
-        if not self.user or not self.session_id:
+        if not self.existing_sessions:
             self.create_new_session_dialog()
             return
 
-        with self.dialog.props('persistent'), ui.card().classes('w-[600px] p-6'):
-            ui.label(f'Welcome back, {self.user.full_name}!').classes('text-2xl font-bold mb-4')
+        # Sort sessions by last_activity (most recent first)
+        sorted_sessions = sorted(
+            self.existing_sessions.items(),
+            key=lambda x: x[1].get('last_activity', 0),
+            reverse=True
+        )
 
-            # Session selection dropdown (future: will support multiple sessions)
+        # Get most recent session for welcome message
+        session_id, session = sorted_sessions[0]
+        first_name = session.get('user_first_name', None)
+        last_name = session.get('user_last_name', None)
+        display_name = f'{first_name} {last_name}' if first_name and last_name else None
+
+        with self.dialog.props('persistent'), ui.card().classes('w-[600px] p-6'):
+            if display_name:
+                ui.label(f'Welcome back, {display_name}!').classes('text-2xl font-bold mb-4')
+            else:
+                ui.label('Welcome back!').classes('text-2xl font-bold mb-4')
+
+            # Session selection dropdown
             with ui.column().classes('w-full gap-2 mb-6'):
                 ui.label('Available sessions:').classes('text-sm font-semibold mb-2')
 
-                # Build session data with metadata
-                # Store metadata separately to access after selection
-                self.sessions_data = [{
-                    'first_name': self.user.first_name,
-                    'last_name': self.user.last_name,
-                    'email': self.user.email,
-                    'timestamp': self.user.timestamp,
-                    'session_id': self.session_id,
-                    'project_name': self.project_name,
-                    'display': f'{self.project_name}'
-                }]
-
-                # Currently single session, but dropdown ready for multiple
-                # ui.select needs simple dict format: {value: label}
+                # Build options dict for dropdown
                 options = {
-                    session['session_id']: session['display']
-                    for session in self.sessions_data
+                    session_id: session_data.get('project_name', 'Unnamed Project')
+                    for session_id, session_data in self.existing_sessions.items()
                 }
+
+                # Default to most recent session
+                default_session_id = session_id
 
                 self.session_select = ui.select(
                     options=options,
-                    value=self.session_id,
+                    value=default_session_id,
                     with_input=False
                 ).classes('w-full').props('outlined')
 
@@ -84,16 +88,45 @@ class Login:
                         """Update metadata display based on selected session."""
                         self.metadata_display.clear()
                         selected_id = self.session_select.value
-                        # Find the session data for the selected ID
-                        meta = next((s for s in self.sessions_data if s['session_id'] == selected_id), None)
-                        if meta:
+                        # Get the session data for the selected ID
+                        session = self.existing_sessions.get(selected_id)
+                        if session:
+                            from datetime import datetime
+
                             with self.metadata_display:
-                                ui.label(f"Project: {meta.get('project_name', 'My Binary System')}").classes('text-sm text-gray-700 font-semibold')
-                                ui.label(f"Owner: {meta['first_name']} {meta['last_name']}").classes('text-sm text-gray-700')
-                                if meta.get('email'):
-                                    ui.label(f"Email: {meta['email']}").classes('text-sm text-gray-700')
-                                ui.label(f"Started on: {meta['timestamp']}").classes('text-sm text-gray-700')
-                                ui.label(f"Session ID: {meta['session_id']}").classes('text-sm text-gray-600 font-mono')
+                                ui.label(f"Project: {session.get('project_name', 'Unnamed Project')}").classes('text-sm text-gray-700 font-semibold')
+
+                                # Owner information
+                                first_name = session.get('user_first_name', None)
+                                last_name = session.get('user_last_name', None)
+
+                                owner_name = f'{first_name} {last_name}' if first_name and last_name else None
+                                if owner_name:
+                                    ui.label(f"Owner: {owner_name}").classes('text-sm text-gray-700')
+
+                                email = session.get('user_email', '')
+                                if email:
+                                    ui.label(f"Email: {email}").classes('text-sm text-gray-700')
+
+                                # Session timing information
+                                created_at = session.get('created_at', 0)
+                                if created_at:
+                                    created_dt = datetime.fromtimestamp(created_at)
+                                    ui.label(f"Created: {created_dt.strftime('%Y-%m-%d %H:%M:%S')}").classes('text-sm text-gray-700')
+
+                                last_activity = session.get('last_activity', 0)
+                                if last_activity:
+                                    activity_dt = datetime.fromtimestamp(last_activity)
+                                    ui.label(f"Last Activity: {activity_dt.strftime('%Y-%m-%d %H:%M:%S')}").classes('text-sm text-gray-700')
+
+                                # Memory usage
+                                mem_used = session.get('mem_used', 0)
+                                if mem_used:
+                                    ui.label(f"Memory: {mem_used:.1f} MB").classes('text-sm text-gray-700')
+
+                                # Session ID
+                                session_id_short = session['session_id'][:16]
+                                ui.label(f"Session ID: {session_id_short}...").classes('text-sm text-gray-600 font-mono')
 
                     # Initialize metadata display
                     update_metadata_display()
@@ -104,13 +137,18 @@ class Login:
             # Action buttons
             with ui.row().classes('w-full gap-3 mt-4'):
                 ui.button(
-                    'Continue Session',
+                    'New',
+                    on_click=self.on_start_new_session
+                ).classes('flex-1 bg-blue-600 text-white').props('size=lg')
+
+                ui.button(
+                    'Reconnect',
                     on_click=self.on_continue_session
                 ).classes('flex-1 bg-blue-600 text-white').props('size=lg')
 
                 ui.button(
-                    'Start New Session',
-                    on_click=self.on_start_new_session
+                    'Delete',
+                    on_click=self.on_delete_session
                 ).classes('flex-1 bg-blue-600 text-white').props('size=lg')
 
         self.dialog.open()
@@ -163,16 +201,81 @@ class Login:
         """Handle continue session button click."""
         # Get selected session metadata
         selected_id = self.session_select.value
-        selected_session = next((s for s in self.sessions_data if s['session_id'] == selected_id), None)
-        project_name = selected_session.get('project_name', 'My Binary System') if selected_session else 'My Binary System'
+        selected_session = self.existing_sessions.get(selected_id)
+
+        if not selected_session:
+            ui.notify('Invalid session selection', type='negative')
+            return
+
+        # Construct User from session fields
+        user = User(
+            first_name=selected_session.get('user_first_name', ''),
+            last_name=selected_session.get('user_last_name', ''),
+            email=selected_session.get('user_email', '')
+        )
+        project_name = selected_session.get('project_name', 'Unnamed Project')
 
         self.dialog.close()
-        self.on_login_completed(user=self.user, session_id=self.session_select.value, project_name=project_name)
+        self.on_login_completed(user=user, session_id=selected_id, project_name=project_name)
 
     def on_start_new_session(self):
         """Handle start new session button click."""
         self.dialog.clear()
         self.create_new_session_dialog()
+
+    def on_delete_session(self):
+        """Handle delete session button click with confirmation."""
+        selected_id = self.session_select.value
+        if not selected_id:
+            ui.notify('No session selected', color='warning')
+            return
+
+        # Get the selected session data
+        session = self.existing_sessions.get(selected_id)
+        if not session:
+            ui.notify('Session not found', color='negative')
+            return
+
+        project_name = session.get('project_name', 'Unnamed Project')
+
+        # Create confirmation dialog
+        with ui.dialog() as confirm_dialog, ui.card().classes('p-6'):
+            ui.label(f"Delete session '{project_name}'?").classes('text-lg font-semibold mb-2')
+            ui.label('This action cannot be undone.').classes('text-sm text-gray-600 mb-4')
+
+            with ui.row().classes('w-full gap-2 justify-end'):
+                ui.button('Cancel', on_click=confirm_dialog.close).props('flat')
+                ui.button(
+                    'Delete',
+                    on_click=lambda: self.confirm_delete(selected_id, confirm_dialog)
+                ).props('flat color=negative')
+
+        confirm_dialog.open()
+
+    def confirm_delete(self, session_id: str, confirm_dialog):
+        confirm_dialog.close()
+
+        try:
+            # End the session on the server
+            self.client.end_session(session_id)
+
+            # Refresh sessions dict from server
+            self.existing_sessions = self.client.get_sessions()
+
+            ui.notify('Session deleted successfully', color='positive')
+
+            # If no sessions left, switch to new session dialog
+            if not self.existing_sessions:
+                self.dialog.clear()
+                # self.dialog.close()
+                self.create_new_session_dialog()
+            else:
+                # Refresh the dialog with remaining sessions
+                self.dialog.clear()
+                self.create_existing_session_dialog()
+
+        except Exception as e:
+            ui.notify(f'Failed to delete session: {str(e)}', color='negative')
 
     def validate_login(self) -> bool:
         """Validate login input fields."""

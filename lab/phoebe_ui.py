@@ -1,6 +1,7 @@
 import io
 import json
-from nicegui import ui, app
+from nicegui import ui
+from nicegui import app  # noqa: F401 - Required for storage_secret in ui.run()
 import numpy as np
 import plotly.graph_objects as go
 from pathlib import Path
@@ -1857,7 +1858,7 @@ def attach_ui_parameters(phoebe_client: PhoebeClient, backend=None, morphology=N
         {
             'ptype': 'string',
             'qualifier': 'project_name',
-            'value': 'My Binary System',
+            'value': 'Unnamed Project',
             'description': 'Name of the binary system / project',
             'context': 'ui'
         },
@@ -1916,32 +1917,12 @@ def main_page():
     # Initialize phoebe API client
     phoebe_client = PhoebeClient(host='localhost', port=8001)
 
-    # Check for existing session in storage
-    existing_session_id = app.storage.user.get('session_id')
-    existing_user = app.storage.user.get('user')
-    existing_project_name = app.storage.user.get('project_name', 'My Binary System')
-
-    if existing_session_id and existing_user:
-        existing_user = User.from_dict(existing_user)
-
-        # Check for running sessions on the server
-        active_sessions = phoebe_client.get_sessions()
-
-        # If existing session is no longer active, clear it
-        if existing_session_id not in active_sessions:
-            existing_session_id = None
-            existing_user = None
-            existing_project_name = None
-            app.storage.user.clear()
-    else:
-        # Clear incomplete session data
-        existing_session_id = None
-        existing_user = None
-        existing_project_name = None
+    # Get existing sessions from server (dict with session_id keys)
+    existing_sessions = phoebe_client.get_sessions()
 
     main_container = ui.column().classes('w-full h-full items-center justify-start p-4 gap-4')
 
-    def on_login_completed(user: User, session_id: str | None = None, project_name: str = "My Binary System"):
+    def on_login_completed(user: User, session_id: str | None = None, project_name: str = 'Unnamed Project'):
         """Handle login completion and create main UI."""
 
         if session_id is None:
@@ -1953,19 +1934,11 @@ def main_page():
 
             # Set project name parameter value
             phoebe_client.set_value(twig='project_name@ui', value=project_name)
-
-            # Store user, session_id, and project_name in storage
-            app.storage.user['user'] = user.to_dict()
-            app.storage.user['session_id'] = session.get('session_id')
-            app.storage.user['port'] = session.get('port')
-            app.storage.user['project_name'] = project_name
             reconnect = False
         else:
             session = phoebe_client.get_sessions()[session_id]
             # Get project_name from server (server is source of truth)
-            project_name = session.get('project_name', project_name or 'My Binary System')
-            # Update local storage cache with server value
-            app.storage.user['project_name'] = project_name
+            project_name = session.get('project_name', project_name or 'Unnamed Project')
             reconnect = True
 
         # Create main UI
@@ -1985,10 +1958,9 @@ def main_page():
                 ui_instance.parameters['project_name@ui'].on_value_changed(event=False)
 
     Login(
+        client=phoebe_client,
         on_login_completed=on_login_completed,
-        existing_session_id=existing_session_id,
-        existing_user=existing_user,
-        existing_project_name=existing_project_name
+        existing_sessions=existing_sessions
     )
 
 
