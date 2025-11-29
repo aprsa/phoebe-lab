@@ -7,8 +7,7 @@ import plotly.graph_objects as go
 from pathlib import Path
 from phoebe_client import PhoebeClient
 from lab.utils import time_to_phase, alias_data, flux_to_magnitude
-from lab.user import User
-from lab.login import Login
+from lab.sessions import LoginDialog, SessionDialog, SessionInfo
 from asyncio import get_event_loop
 
 
@@ -872,18 +871,16 @@ class Dataset:
 class PhoebeUI:
     """Main Phoebe UI."""
 
-    def __init__(self, phoebe_client: PhoebeClient = None, user: User | None = None, session_id: str | None = None, reconnect: bool = False):
-        # there are many callbacks that depend on the UI being fully
-        # initialized, so we keep the UI state explicitly:
+    def __init__(self, phoebe_client: PhoebeClient, session_info: SessionInfo, context_data: dict = {}):
+        # prevent callbacks from firing during init:
         self.fully_initialized = False
-        self.reconnect = reconnect
 
         self.client = phoebe_client
-        self.user = user  # User metadata for session identification
-        self.session_id = session_id
+        self.session_info = session_info
+        self.context_data = context_data
 
         # sync session id with upstream:
-        self.client.set_session_id(session_id)
+        self.client.set_session_id(session_info.session_id)
 
         # Parameters:
         self.parameters = {}
@@ -912,15 +909,20 @@ class PhoebeUI:
             plot_resize_js = f'Plotly.Plots.resize(getHtmlElement({plot_id}))'
             self.main_splitter.on_value_change(lambda: ui.run_javascript(plot_resize_js))
 
-        self.fully_initialized = True
+        # Set project name parameter from session info
+        if self.session_info.project_name:
+            self.parameters['project_name@ui'].set_value(self.session_info.project_name)
+            self.parameters['project_name@ui'].on_value_changed(event=False)
 
         # If reconnecting to existing session, sync UI state from backend bundle
-        if self.reconnect:
+        if not self.session_info.is_new_session:
             # sync with upstream:
             response = self.client.get_bundle()
             if response.get('success'):
                 pset = json.loads(response['result'].get('bundle'))
                 self.sync_ui_state(pset=pset)
+
+        self.fully_initialized = True
 
     def add_parameter(self, qualifier: str, label: str, step: float, adjust: bool, vformat: str = '%.3f', sformat: str = '%.3f', on_value_changed=None, **kwargs):
         parameter = PhoebeAdjustableParameterWidget(
@@ -959,6 +961,11 @@ class PhoebeUI:
                 icon='file_download',
                 on_click=self.on_save_model
             ).classes('flex-1 bg-green-600 text-white')
+
+            # Menu button for additional options
+            with ui.button(icon='menu').classes('bg-gray-700 text-white'):
+                with ui.menu():
+                    ui.menu_item('Manage Sessions', on_click=self.on_manage_sessions)
 
         # Target/project name:
         self.parameters['project_name@ui'] = PhoebeParameterWidget(
@@ -1837,19 +1844,21 @@ class PhoebeUI:
         finally:
             self.save_button.props(remove='loading')
 
+    def on_manage_sessions(self):
+        """Open session manager dialog to switch or manage sessions."""
+        self.context_data['session_dialog'].show()
+
     def get_user_info(self):
         """Get user information for logging or display purposes."""
-        if self.user:
-            return self.user.full_name
-        return "Unknown User"
+        return self.session_info.full_name or "Unknown User"
 
     def get_session_info(self):
         """Get session information for logging or display purposes."""
         return {
-            'session_id': self.session_id,
-            'user_name': self.get_user_info(),
-            'user_email': self.user.email if self.user else None,
-            'session_active': bool(self.session_id)
+            'session_id': self.session_info.session_id,
+            'user_name': self.session_info.full_name,
+            'user_email': self.session_info.email,
+            'session_active': not self.session_info.is_new_session
         }
 
 
@@ -1915,53 +1924,75 @@ def main_page():
     """Main page for the Phoebe Lab UI with student identification."""
 
     # Initialize phoebe API client
-    phoebe_client = PhoebeClient(host='localhost', port=8001)
+    client = PhoebeClient(host='localhost', port=8001)
 
-    # Get existing sessions from server (dict with session_id keys)
-    existing_sessions = phoebe_client.get_sessions()
+    main_window = ui.column().classes('w-full h-full items-center justify-start p-4 gap-4')
 
-    main_container = ui.column().classes('w-full h-full items-center justify-start p-4 gap-4')
+    def on_session_activated(session_info: SessionInfo, context_data: dict):
+        """Handle session activation (new or reconnected) and create main UI."""
 
-    def on_login_completed(user: User, session_id: str | None = None, project_name: str = 'Unnamed Project'):
-        """Handle login completion and create main UI."""
-
-        if session_id is None:
+        if session_info.is_new_session:
             # no existing session -- start a new one:
-            metadata = user.to_dict()
-            metadata['project_name'] = project_name
-            session = phoebe_client.start_session(metadata=metadata)
-            attach_ui_parameters(phoebe_client)
+            response = client.start_session(metadata=session_info.to_dict())
+
+            # Update session_info with server response (session_id, etc.)
+            session_info.update(response)
+
+            attach_ui_parameters(client)
 
             # Set project name parameter value
-            phoebe_client.set_value(twig='project_name@ui', value=project_name)
-            reconnect = False
+            client.set_value(twig='project_name@ui', value=session_info.project_name)
         else:
-            session = phoebe_client.get_sessions()[session_id]
-            # Get project_name from server (server is source of truth)
-            project_name = session.get('project_name', project_name or 'Unnamed Project')
-            reconnect = True
+            # Reconnecting to existing session - sync from server
+            sessions = client.get_sessions()
+            if session_info.session_id in sessions:
+                server_data = sessions[session_info.session_id]
+                session_info.update(server_data)
+
+        # Update session dialog with current session
+        session_dialog = context_data['session_dialog']
+        session_dialog.current_session_id = session_info.session_id
+        session_dialog.refresh()
 
         # Create main UI
-        main_container.clear()
+        main_window.clear()
 
-        with main_container:
-            ui_instance = PhoebeUI(
-                phoebe_client=phoebe_client,
-                user=user,
-                session_id=session.get('session_id'),
-                reconnect=reconnect
+        with main_window:
+            PhoebeUI(
+                phoebe_client=client,
+                session_info=session_info,
+                context_data=context_data
             )
 
-            # Set project name parameter on reconnect
-            if reconnect and project_name:
-                ui_instance.parameters['project_name@ui'].set_value(project_name)
-                ui_instance.parameters['project_name@ui'].on_value_changed(event=False)
+    sessions = client.get_sessions()
 
-    Login(
-        client=phoebe_client,
-        on_login_completed=on_login_completed,
-        existing_sessions=existing_sessions
+    # Initialize dialogs:
+    login_dialog = LoginDialog(
+        client=client,
+        sessions=sessions,
+        on_session_activated=on_session_activated
     )
+
+    session_dialog = SessionDialog(
+        client=client,
+        sessions=sessions,
+        current_session_id=None,
+        on_session_activated=on_session_activated
+    )
+
+    context_data = {
+        'session_dialog': session_dialog,
+        'login_dialog': login_dialog
+    }
+
+    login_dialog.attach_context_data(context_data)
+    session_dialog.attach_context_data(context_data)
+
+    # Route to appropriate dialog based on existing sessions
+    if sessions:
+        session_dialog.show()
+    else:
+        login_dialog.show()
 
 
 def main():
