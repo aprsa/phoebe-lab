@@ -11,6 +11,30 @@ from lab.sessions import LoginDialog, SessionDialog, SessionInfo
 from asyncio import get_event_loop
 
 
+# Color scheme for data/model plots: 10 high-contrast color combinations.
+# Each entry contains colors for data markers and model lines, plus symbol/dash
+# style for cycling through multiple sets of 10 datasets.
+
+DATASET_COLORS = [
+    {'data': '#1f77b4', 'model': '#ff7f0e'},  # Blue / Orange
+    {'data': '#2ca02c', 'model': '#d62728'},  # Green / Red
+    {'data': '#e377c2', 'model': '#7f7f7f'},  # Pink / Gray
+    {'data': '#17becf', 'model': '#bcbd22'},  # Cyan / Olive
+    {'data': '#393b79', 'model': '#e7969c'},  # Navy / Salmon
+    {'data': '#8c6d31', 'model': '#e7ba52'},  # Sienna / Gold
+    # {'data': '#9467bd', 'model': '#8c564b'},  # Purple / Brown
+    # {'data': '#637939', 'model': '#b5cf6b'},  # Forest / Lime
+    # {'data': '#843c39', 'model': '#ad494a'},  # Maroon / Coral
+    # {'data': '#7b4173', 'model': '#ce6dbd'},  # Plum / Orchid
+]
+
+# Marker symbols for cycling through datasets beyond the first 10.
+MARKER_SYMBOLS = ['circle', 'x', 'diamond', 'square', 'cross']
+
+# Line dash patterns for cycling through datasets beyond the first 10.
+LINE_DASHES = ['solid', 'dash', 'dot', 'dashdot', 'longdash']
+
+
 class PhoebeParameterWidget:
     """
     Parent class for all parameter widgets.
@@ -903,11 +927,13 @@ class PhoebeUI:
             with self.main_splitter.after:
                 self.create_analysis_panel()
 
-            # Allow plot width change on splitter drag
-            # Handle plot resize on splitter change
-            plot_id = self.lc_canvas.id
-            plot_resize_js = f'Plotly.Plots.resize(getHtmlElement({plot_id}))'
-            self.main_splitter.on_value_change(lambda: ui.run_javascript(plot_resize_js))
+        # Handle plot resize on splitter change (plot is created lazily)
+        def resize_plot():
+            if self.lc_canvas is not None:
+                plot_id = self.lc_canvas.id
+                ui.run_javascript(f'Plotly.Plots.resize(getHtmlElement({plot_id}))')
+
+        self.main_splitter.on_value_change(resize_plot)
 
         # Set project name parameter from session info
         if self.session_info.project_name:
@@ -1249,7 +1275,7 @@ class PhoebeUI:
                     ).classes('h-12 flex-shrink-0')
 
     def create_lc_panel(self):
-        with ui.expansion('Light curve', icon='insert_chart', value=False).classes('w-full'):
+        with ui.expansion('Light curve', icon='insert_chart', value=False).classes('w-full') as lc_expansion:
 
             with ui.column().classes('w-full h-full p-4 min-w-0'):
 
@@ -1278,15 +1304,17 @@ class PhoebeUI:
                     # Plot button, styled for alignment
                     ui.button('Plot', on_click=self.on_lc_plot_button_clicked).classes('bg-blue-500 h-10 translate-y-4')
 
-                # Plot container
-                self.lc_canvas = ui.plotly(self.create_empty_styled_lc_plot()).classes('w-full  min-w-0')
+                # Container for plot canvas - created lazily on first expansion open
+                self.lc_canvas_container = ui.column().classes('w-full min-w-0')
+                self.lc_canvas = None
 
-                # Add resize observer to handle container size changes
-                self.lc_canvas._props['config'] = {
-                    'responsive': True,
-                    'displayModeBar': True,
-                    'displaylogo': False
-                }
+        # Lazily create plot when expansion is first opened
+        def on_expansion_open():
+            if lc_expansion.value and self.lc_canvas is None:
+                with self.lc_canvas_container:
+                    self.lc_canvas = ui.plotly(self.create_empty_styled_lc_plot()).classes('w-full min-w-0')
+
+        lc_expansion.on_value_change(on_expansion_open)
 
     def create_fitting_panel(self):
         with ui.expansion('Model fitting', icon='tune', value=False).classes('w-full'):
@@ -1338,15 +1366,22 @@ class PhoebeUI:
                     row_key='parameter',
                 ).classes('w-full').props('no-data-label="No parameters selected for adjustment."')
 
-                # Adopt solution button (right-justified)
+                # Solution buttons (right-justified)
                 with ui.row().classes('w-full justify-end mt-3'):
+                    self.preview_solution_button = ui.button(
+                        'Preview Solution',
+                        icon='visibility',
+                        on_click=self.preview_solver_solution
+                    ).classes('bg-green-600 text-white px-6 py-2')
+
                     self.adopt_solution_button = ui.button(
                         'Adopt Solution',
                         icon='check_circle',
                         on_click=self.adopt_solver_solution
                     ).classes('bg-green-600 text-white px-6 py-2')
 
-                    # disable it by default (no solution yet)
+                    # disable them by default (no solution yet)
+                    self.preview_solution_button.props('disabled')
                     self.adopt_solution_button.props('disabled')
 
     def create_empty_styled_lc_plot(self):
@@ -1381,7 +1416,6 @@ class PhoebeUI:
                 showline=True,
                 linecolor='black',
                 linewidth=2,
-                # autorange='reversed' if y_reversed else True,
                 zeroline=False,
                 showgrid=True,
                 gridcolor='lightgray',
@@ -1399,22 +1433,51 @@ class PhoebeUI:
         # Handle updates to the light curve plot
         return
 
-    def on_lc_plot_button_clicked(self):
-        # We'll redraw the figure from scratch each time.
+    def create_lc_figure(self, preview_model_data: dict | None = None):
+        """
+        Create a light curve figure with current data and model.
+
+        Args:
+            preview_model_data: Optional dict of model data for preview mode.
+                               If provided, uses this data instead of stored model_fluxes.
+                               Format: {ds_label: {'fluxes': [...], ...}, ...}
+
+        Returns:
+            Plotly Figure object
+        """
         fig = self.create_empty_styled_lc_plot()
 
-        # Update legend visibility based on checkbox
-        show_legend = self.widgets['lc_plot_legend'].value
-        fig.update_layout(showlegend=show_legend)
+        # Update axis labels based on dropdown selections
+        x_axis = self.widgets['lc_plot_x_axis'].value
+        y_axis = self.widgets['lc_plot_y_axis'].value
+
+        x_title = 'Phase' if x_axis == 'phase' else 'Time (BJD)'
+        y_title = 'Magnitude' if y_axis == 'magnitude' else 'Flux'
+
+        # Update layout with correct axis titles and y-axis direction for magnitude
+        layout_updates = {
+            'xaxis_title': x_title,
+            'yaxis_title': y_title,
+            'showlegend': self.widgets['lc_plot_legend'].value
+        }
+        if y_axis == 'magnitude':
+            layout_updates['yaxis_autorange'] = 'reversed'
+
+        fig.update_layout(**layout_updates)
 
         period = self.parameters['period@binary@orbit@component'].get_value()
         t0 = self.parameters['t0_supconj@binary@orbit@component'].get_value()
 
         # See what needs to be plotted:
+        dataset_index = 0
         for ds_label, ds_meta in self.dataset.datasets.items():
             if ds_meta['kind'] == 'lc':
-                x_axis = self.widgets['lc_plot_x_axis'].value
-                y_axis = self.widgets['lc_plot_y_axis'].value
+                # Get color scheme for this dataset
+                color_idx = dataset_index % len(DATASET_COLORS)
+                cycle_idx = dataset_index // len(DATASET_COLORS)
+                colors = DATASET_COLORS[color_idx]
+                marker_symbol = MARKER_SYMBOLS[cycle_idx % len(MARKER_SYMBOLS)]
+                line_dash = LINE_DASHES[cycle_idx % len(LINE_DASHES)]
 
                 if ds_meta['plot_data']:
                     if x_axis == 'time':
@@ -1437,22 +1500,55 @@ class PhoebeUI:
                         x=data[:, 0],
                         y=data[:, 1],
                         mode='markers',
+                        marker={'color': colors['data'], 'symbol': marker_symbol},
                         name=ds_label
                     ))
 
                 if ds_meta['plot_model']:
-                    if not ds_meta['model_fluxes']:
-                        ui.notify(f'No model fluxes available for dataset {ds_label}. Please compute the model first.', type='warning')
-                    compute_phases = np.linspace(ds_meta['phase_min'], ds_meta['phase_max'], ds_meta['n_points'])
-                    if x_axis == 'time':
-                        xs = t0 + period * compute_phases
+                    # Use preview model data if provided, otherwise use stored model
+                    if preview_model_data is not None and ds_label in preview_model_data:
+                        model_fluxes = np.array(preview_model_data[ds_label].get('fluxes', []))
                     else:
-                        xs = compute_phases
+                        model_fluxes = np.array(ds_meta['model_fluxes'])
+
+                    if len(model_fluxes) == 0:
+                        ui.notify(f'No model fluxes available for dataset {ds_label}. Please compute the model first.', type='warning')
+                        continue
+
+                    # Generate phase grid matching model data length
+                    n_model_points = len(model_fluxes)
+                    compute_phases = np.linspace(ds_meta['phase_min'], ds_meta['phase_max'], n_model_points)
 
                     if y_axis == 'flux':
-                        ys = ds_meta['model_fluxes']
+                        ys = model_fluxes
                     else:
-                        ys = flux_to_magnitude(ds_meta['model_fluxes'])
+                        ys = flux_to_magnitude(model_fluxes)
+
+                    if x_axis == 'time':
+                        # Tile model across full time span of data
+                        if ds_meta['plot_data'] and len(ds_meta['times']) > 0:
+                            t_min = np.min(ds_meta['times'])
+                            t_max = np.max(ds_meta['times'])
+                            # Calculate which cycles we need to cover
+                            cycle_min = int(np.floor((t_min - t0) / period))
+                            cycle_max = int(np.ceil((t_max - t0) / period))
+                            # Build tiled model
+                            all_xs = []
+                            all_ys = []
+                            for cycle in range(cycle_min, cycle_max + 1):
+                                cycle_times = t0 + period * (compute_phases + cycle)
+                                all_xs.extend(cycle_times)
+                                all_ys.extend(ys)
+                            xs = np.array(all_xs)
+                            ys = np.array(all_ys)
+                            # Trim to exact data time range
+                            mask = (xs >= t_min) & (xs <= t_max)
+                            xs = xs[mask]
+                            ys = ys[mask]
+                        else:
+                            xs = t0 + period * compute_phases
+                    else:
+                        xs = compute_phases
 
                     model = np.column_stack((xs, ys))
 
@@ -1463,10 +1559,19 @@ class PhoebeUI:
                         x=model[:, 0],
                         y=model[:, 1],
                         mode='lines',
-                        line={'color': 'red'},
+                        line={'color': colors['model'], 'dash': line_dash},
                         name=ds_label
                     ))
 
+                dataset_index += 1
+
+        return fig
+
+    def on_lc_plot_button_clicked(self):
+        """Redraw the light curve plot with current data and model."""
+        if self.lc_canvas is None:
+            return
+        fig = self.create_lc_figure()
         self.lc_canvas.figure = fig
         self.lc_canvas.update()
 
@@ -1609,7 +1714,8 @@ class PhoebeUI:
                 # Update the solver results table
                 self.update_solution_table(solution_data)
 
-                # Enable adopt solution button:
+                # Enable solution buttons:
+                self.preview_solution_button.props(remove='disabled')
                 self.adopt_solution_button.props(remove='disabled')
 
                 ui.notify("Model fitting succeeded", type='positive')
@@ -1689,6 +1795,87 @@ class PhoebeUI:
         self.solution_table.rows = rows
         self.solution_table.update()
 
+    async def preview_solver_solution(self):
+        """
+        Preview the solver solution by showing a side-by-side comparison dialog.
+
+        Shows "Before" (current model) and "After" (model with fitted parameters)
+        plots so user can compare and decide whether to adopt the solution.
+        """
+        try:
+            # Show loading indicator on preview button
+            self.preview_solution_button.props('loading')
+
+            # Compute model with solution='latest' to get preview
+            response = await get_event_loop().run_in_executor(
+                None, lambda: self.client.run_compute(solution='latest')
+            )
+
+            if not response.get('success', False):
+                ui.notify(f"Failed to compute preview: {response.get('error', 'Unknown error')}", type='negative')
+                return
+
+            preview_model_data = response['result'].get('model', {})
+
+            # Create the preview dialog
+            with ui.dialog() as preview_dialog, ui.card().classes('w-[1200px] max-w-[95vw]'):
+                ui.label('Solution Preview').classes('text-xl font-bold mb-4')
+                ui.label('Compare the current model (Before) with the fitted solution (After)').classes('text-gray-600 mb-4')
+
+                # Side-by-side plots
+                with ui.row().classes('w-full gap-4'):
+                    # Before plot (current model)
+                    with ui.column().classes('flex-1'):
+                        ui.label('Before (Current Parameters)').classes('text-lg font-semibold mb-2 text-center')
+                        before_fig = self.create_lc_figure()
+                        before_fig.update_layout(height=350, title=None)
+                        ui.plotly(before_fig).classes('w-full')
+
+                    # After plot (preview with fitted parameters)
+                    with ui.column().classes('flex-1'):
+                        ui.label('After (Fitted Parameters)').classes('text-lg font-semibold mb-2 text-center')
+                        after_fig = self.create_lc_figure(preview_model_data=preview_model_data)
+                        after_fig.update_layout(height=350, title=None)
+                        ui.plotly(after_fig).classes('w-full')
+
+                # Parameter changes table
+                ui.separator().classes('my-4')
+                ui.label('Parameter Changes:').classes('font-semibold')
+                with ui.row().classes('w-full'):
+                    ui.table(
+                        columns=[
+                            {'name': 'parameter', 'label': 'Parameter', 'field': 'parameter', 'align': 'left'},
+                            {'name': 'initial', 'label': 'Current', 'field': 'initial', 'align': 'right'},
+                            {'name': 'fitted', 'label': 'Fitted', 'field': 'fitted', 'align': 'right'},
+                            {'name': 'change_percent', 'label': 'Change', 'field': 'change_percent', 'align': 'right'},
+                        ],
+                        rows=list(self.solution_table.rows),
+                        row_key='parameter',
+                    ).classes('w-full')
+
+                # Dialog buttons
+                ui.separator().classes('my-4')
+                with ui.row().classes('w-full justify-end gap-2'):
+                    ui.button('Close', on_click=preview_dialog.close).props('flat')
+                    ui.button(
+                        'Adopt Solution',
+                        icon='check_circle',
+                        on_click=lambda: self._adopt_and_close(preview_dialog)
+                    ).classes('bg-green-600 text-white')
+
+            preview_dialog.open()
+
+        except Exception as e:
+            ui.notify(f'Error previewing solution: {str(e)}', type='negative')
+        finally:
+            self.preview_solution_button.props(remove='loading')
+
+    def _adopt_and_close(self, dialog):
+        """Helper to adopt solution and close the preview dialog."""
+        self.adopt_solver_solution()
+        dialog.close()
+        ui.notify('Solution adopted successfully', type='positive')
+
     def adopt_solver_solution(self):
         """Adopt the solver solution by setting fitted values to current parameters."""
         try:
@@ -1716,6 +1903,7 @@ class PhoebeUI:
                 ds_meta['model_rv2s'] = []
 
             # Disable adopt solution button:
+            self.preview_solution_button.props('disabled')
             self.adopt_solution_button.props('disabled')
         except Exception as e:
             ui.notify(f'Error adopting solver solution: {str(e)}', type='negative')
