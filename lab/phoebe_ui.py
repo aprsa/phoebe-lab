@@ -378,6 +378,7 @@ class Dataset:
             compute_phases=compute_phases,
             times=dataset_meta.get('times', []),
             sigmas=dataset_meta.get('sigmas', []),
+            overwrite=True,
             **data_kwargs
         )
 
@@ -412,7 +413,7 @@ class Dataset:
                 params['rv1s'] = dataset.get('rv1s', [])
                 params['rv2s'] = dataset.get('rv2s', [])
 
-            self.client.add_dataset(kind=dataset['kind'], params=params)
+            self.client.add_dataset(kind=dataset['kind'], overwrite=True, **params)
             if len(dataset['fluxes']) > 0 or len(dataset['rv1s']) > 0 or len(dataset['rv2s']) > 0:
                 self.client.set_value(twig=f'pblum_mode@{dataset["dataset"]}', value='dataset-scaled')
 
