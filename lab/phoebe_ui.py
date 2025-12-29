@@ -678,7 +678,8 @@ class Dataset:
 
                 self.widgets['dataset_passband'] = ui.select(
                     options=['GoChile:R', 'GoChile:G', 'GoChile:B', 'GoChile:L', 'TESS:T', 'Kepler:mean', 'Gaia:BP', 'Gaia:RP', 'Gaia:G', 'Gaia:RVS', 'Johnson:V'],
-                    label='Passband'
+                    label='Passband',
+                    value='Johnson:V'
                 ).classes('w-full')
 
                 # Phase parameters section
@@ -782,7 +783,7 @@ class Dataset:
         self.widgets['dataset_kind'].value = 'lc'
         self.widgets['dataset_label'].value = f'ds{len(self.datasets)+1:02d}'
         self.widgets['dataset_label'].enable()
-        self.widgets['dataset_passband'].value = ''
+        self.widgets['dataset_passband'].value = 'Johnson:V'
         self.widgets['dataset_n_points'].value = 201
         self.widgets['dataset_phase_min'].value = -0.5
         self.widgets['dataset_phase_max'].value = 0.5
@@ -885,7 +886,7 @@ class Dataset:
     async def _on_file_uploaded(self, event):
         """Handle file upload."""
 
-        if event and event.file and event.file._data:
+        if event and event.file:
             self.data_file = event.file.name
             self.data_content = await event.file.text()
             ui.notify(f'File uploaded: {self.data_file}', type='positive')
@@ -1303,7 +1304,7 @@ class PhoebeUI:
                     self.widgets['lc_plot_legend'].on('update:model-value', lambda: self.on_lc_plot_update())
 
                     # Plot button, styled for alignment
-                    ui.button('Plot', on_click=self.on_lc_plot_button_clicked).classes('bg-blue-500 h-10 translate-y-4')
+                    self.plot_button = ui.button('Plot', on_click=self.on_lc_plot_button_clicked).classes('bg-blue-500 h-10 translate-y-4')
 
                 # Container for plot canvas - created lazily on first expansion open
                 self.lc_canvas_container = ui.column().classes('w-full min-w-0')
@@ -1568,13 +1569,27 @@ class PhoebeUI:
 
         return fig
 
-    def on_lc_plot_button_clicked(self):
+    async def on_lc_plot_button_clicked(self):
         """Redraw the light curve plot with current data and model."""
         if self.lc_canvas is None:
             return
-        fig = self.create_lc_figure()
-        self.lc_canvas.figure = fig
-        self.lc_canvas.update()
+
+        try:
+            # Show button loading indicator
+            self.plot_button.props('loading')
+
+            # Run the plotting operation asynchronously to avoid blocking the UI with large datasets
+            fig = await get_event_loop().run_in_executor(
+                None, lambda: self.create_lc_figure()
+            )
+
+            self.lc_canvas.figure = fig
+            self.lc_canvas.update()
+        except Exception as e:
+            ui.notify(f"Error plotting data: {str(e)}", type='negative')
+        finally:
+            # Remove button loading indicator
+            self.plot_button.props(remove='loading')
 
     def create_analysis_panel(self):
         with ui.column().classes('w-full h-full p-4 min-w-0'):
@@ -2192,6 +2207,7 @@ def main():
         port=8082,
         title='PHOEBE Lab UI',
         reload=False,
+        reconnect_timeout=300,
         storage_secret='phoebe-lab-secret-key-change-in-production'  # Required for app.storage.user
     )
 
