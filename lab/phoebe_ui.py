@@ -163,7 +163,9 @@ class PhoebeParameterWidget:
 
             # Only call ui_hook after successful validation and server update
             if self.ui_hook:
-                self.ui_hook(value)
+                # ui_hooks are always async
+                import asyncio
+                asyncio.create_task(self.ui_hook(value))
         except Exception as e:
             ui.notify(f'Error setting {self.qualifier}: {str(e)}', type='negative')
 
@@ -948,7 +950,8 @@ class PhoebeUI:
             response = self.client.get_bundle()
             if response.get('success'):
                 pset = json.loads(response['result'].get('bundle'))
-                self.sync_ui_state(pset=pset)
+                import asyncio
+                asyncio.create_task(self.sync_ui_state(pset=pset))
 
         self.fully_initialized = True
 
@@ -1605,16 +1608,16 @@ class PhoebeUI:
             # Fitting panel:
             self.create_fitting_panel()
 
-    def on_ephemeris_changed(self, param_name=None, param_value=None):
+    async def on_ephemeris_changed(self, param_name=None, param_value=None):
         """Handle changes to ephemeris parameters (t0, period) and update phase plot."""
         # Only replot if we're currently showing phase on x-axis or if there's any data to plot
         if self.widgets['lc_plot_x_axis'].value == 'phase' or any(
             ds_meta.get('plot_data', False) or ds_meta.get('plot_model', False)
             for ds_meta in self.dataset.datasets.values() if ds_meta['kind'] == 'lc'
         ):
-            self.on_lc_plot_button_clicked()
+            await self.on_lc_plot_button_clicked()
 
-    def sync_ui_state(self, **kwargs):
+    async def sync_ui_state(self, **kwargs):
         """Sync UI state with backend Phoebe."""
         if not self.client:
             return
@@ -1953,7 +1956,7 @@ class PhoebeUI:
                 dialog.close()
 
                 # Sync UI state with the new model
-                self.sync_ui_state()
+                await self.sync_ui_state()
             else:
                 ui.notify(f"Failed to create new model: {response.get('error', 'Unknown error')}", type='negative')
 
@@ -2007,7 +2010,7 @@ class PhoebeUI:
                 dialog.close()
 
                 # Sync UI state with the loaded model
-                self.sync_ui_state(pset=json.loads(file_content))
+                await self.sync_ui_state(pset=json.loads(file_content))
             else:
                 ui.notify(f"Failed to load bundle: {response.get('error', 'Unknown error')}", type='negative')
 
