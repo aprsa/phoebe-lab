@@ -389,7 +389,10 @@ class Dataset:
         if dataset not in self.datasets:
             raise ValueError(f'Dataset {dataset} does not exist.')
 
-        self.client.remove_dataset(dataset=dataset)
+        response = self.client.remove_dataset(dataset=dataset)
+        if not response.get('success', False):
+            raise ValueError(f"Failed to remove dataset from backend: {response.get('error', 'Unknown error')}")
+
         del self.datasets[dataset]
 
     def readd_all(self):
