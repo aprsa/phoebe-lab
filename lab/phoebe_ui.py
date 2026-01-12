@@ -40,7 +40,18 @@ class PhoebeParameterWidget:
     Parent class for all parameter widgets.
     """
 
-    def __init__(self, client: PhoebeClient, qualifier: str, label: str, format: str = '%.3f', ui_hook=None, classes='flex-1 min-w-0', visible=True, sensitive=True, **kwargs):
+    def __init__(
+        self,
+        client: PhoebeClient,
+        qualifier: str,
+        label: str,
+        format: str = '%.3f',
+        ui_hook=None,
+        classes='flex-1 min-w-0',
+        visible=True,
+        sensitive=True,
+        **kwargs
+    ):
         self.client = client  # API client
         self.ui_hook = ui_hook  # Optional hook for UI updates
 
@@ -312,13 +323,12 @@ class Dataset:
             'kind': 'lc',
             'dataset': 'ds01',
             'passband': 'Johnson:V',
+            'component': '',       # 'primary' or 'secondary' for RV datasets, empty for LC
             'times': [],
-            'fluxes': [],
-            'model_fluxes': [],
-            'rv1s': [],
-            'rv2s': [],
-            'model_rv1s': [],
-            'model_rv2s': [],
+            'fluxes': [],          # LC data
+            'model_fluxes': [],    # LC model
+            'rvs': [],             # RV data (single component per dataset)
+            'model_rvs': [],       # RV model (single component per dataset)
             'sigmas': [],
             'filename': '',
             'n_points': 201,
@@ -367,19 +377,33 @@ class Dataset:
 
         data_kwargs = {}
         if kind == 'lc':
+            data_kwargs['times'] = dataset_meta.get('times', [])
             data_kwargs['fluxes'] = dataset_meta.get('fluxes', [])
+            data_kwargs['sigmas'] = dataset_meta.get('sigmas', [])
             data_kwargs['pblum_mode'] = 'dataset-scaled' if len(dataset_meta.get('fluxes', [])) > 0 else 'component-coupled'
         elif kind == 'rv':
-            data_kwargs['rv1s'] = dataset_meta.get('rv1s', [])
-            data_kwargs['rv2s'] = dataset_meta.get('rv2s', [])
+            component = dataset_meta.get('component', None)
+            if component is None or component not in ['primary', 'secondary']:
+                raise ValueError('RV dataset must specify component (primary/secondary).')
+
+            times_arr = np.array(dataset_meta.get('times', []))
+            rvs_arr = np.array(dataset_meta.get('rvs', []))
+            sigmas_arr = np.array(dataset_meta.get('sigmas', []))
+
+            # Synthetic RVs: send only compute_phases so PHOEBE computes both components
+            if len(times_arr) == 0 and len(rvs_arr) == 0:
+                data_kwargs['component'] = None
+            else:
+                data_kwargs['times'] = {component: times_arr}
+                data_kwargs['rvs'] = {component: rvs_arr}
+                if len(sigmas_arr) == len(times_arr) and len(sigmas_arr) > 0:
+                    data_kwargs['sigmas'] = {component: sigmas_arr}
 
         self.client.add_dataset(
             kind=dataset_meta.get('kind'),
             dataset=dataset_meta.get('dataset'),
             passband=dataset_meta.get('passband', 'Johnson:V'),
             compute_phases=compute_phases,
-            times=dataset_meta.get('times', []),
-            sigmas=dataset_meta.get('sigmas', []),
             overwrite=True,
             **data_kwargs
         )
@@ -408,18 +432,37 @@ class Dataset:
                 'dataset': dataset.get('dataset'),
                 'passband': dataset.get('passband'),
                 'compute_phases': compute_phases,
-                'times': dataset.get('times'),
-                'sigmas': dataset.get('sigmas')
             }
 
             if dataset['kind'] == 'lc':
+                params['times'] = dataset.get('times', [])
                 params['fluxes'] = dataset.get('fluxes', [])
-            if dataset['kind'] == 'rv':
-                params['rv1s'] = dataset.get('rv1s', [])
-                params['rv2s'] = dataset.get('rv2s', [])
+                params['sigmas'] = dataset.get('sigmas', [])
+            elif dataset['kind'] == 'rv':
+                component = dataset.get('rv_component', None)
+                if component is None or component not in ['primary', 'secondary']:
+                    raise ValueError('RV dataset must specify component (primary/secondary).')
 
-            self.client.add_dataset(kind=dataset['kind'], overwrite=True, **params)
-            if len(dataset['fluxes']) > 0 or len(dataset['rv1s']) > 0 or len(dataset['rv2s']) > 0:
+                times_arr = np.array(dataset.get('times', []))
+                rvs_arr = np.array(dataset.get('rvs', []))
+                sigmas_arr = np.array(dataset.get('sigmas', []))
+
+                # Synthetic RVs: omit times/rvs so PHOEBE computes both components
+                if len(times_arr) == 0 and len(rvs_arr) == 0:
+                    params.pop('times', None)
+                    params.pop('sigmas', None)
+                else:
+                    params['times'] = {component: times_arr}
+                    params['rvs'] = {component: rvs_arr}
+                    if len(sigmas_arr) == len(times_arr) and len(sigmas_arr) > 0:
+                        params['sigmas'] = {component: sigmas_arr}
+
+            self.client.add_dataset(
+                kind=dataset['kind'],
+                overwrite=True,
+                **params
+            )
+            if len(dataset.get('fluxes', [])) > 0:
                 self.client.set_value(twig=f'pblum_mode@{dataset["dataset"]}', value='dataset-scaled')
 
     def sync_from_pset(self, pset):
@@ -443,46 +486,115 @@ class Dataset:
                 else:
                     if par['qualifier'] == qualifier and par['context'] == context and par.get('component') == component:
                         return par['value']
+            return None
 
         for dataset in datasets:
-            ds_meta = self._dataset_template.copy()
+            kind = ds_params[dataset][0]['kind']
+            passband = get_value(qualifier='passband', context='dataset', dataset=dataset)
+            sigmas = get_value(qualifier='sigmas', context='dataset', dataset=dataset)
+            sigmas = np.array(sigmas) if sigmas is not None else np.array([])
 
-            # common parameters for all datasets:
-            ds_meta.update({
-                'kind': ds_params[dataset][0]['kind'],
-                'dataset': dataset,
-                'passband': get_value(qualifier='passband', context='dataset', dataset=dataset),
-                'times': np.array(get_value(qualifier='times', context='dataset', dataset=dataset)),
-                'sigmas': np.array(get_value(qualifier='sigmas', context='dataset', dataset=dataset)),
-            })
+            if kind == 'lc':
+                # LC: single dataset entry
+                times = get_value(qualifier='times', context='dataset', dataset=dataset)
+                times = np.array(times) if times is not None else np.array([])
+                fluxes = get_value(qualifier='fluxes', context='dataset', dataset=dataset)
+                fluxes = np.array(fluxes) if fluxes is not None else np.array([])
+                model_fluxes = get_value(qualifier='fluxes', context='model', dataset=dataset)
+                model_fluxes = np.array(model_fluxes) if model_fluxes is not None else np.array([])
 
-            # common parameters that await the update above:
-            ds_meta.update({
-                'data_points': len(ds_meta['times']),
-                'filename': 'From bundle' if len(ds_meta['times']) > 0 else 'Synthetic',
-            })
+                # Get phase parameters from UI context (with fallback defaults)
+                phase_min = get_value(qualifier='phase_min', context='ui', dataset=dataset)
+                phase_max = get_value(qualifier='phase_max', context='ui', dataset=dataset)
+                phase_length = get_value(qualifier='phase_length', context='ui', dataset=dataset)
 
-            # kind-specific parameters:
-            ds_meta.update({
-                'fluxes': np.array(get_value(qualifier='fluxes', context='dataset', dataset=dataset)) if ds_meta['kind'] == 'lc' else np.array([]),
-                'rv1s': np.array(get_value(qualifier='rv1s', context='dataset', dataset=dataset, component='primary')) if ds_meta['kind'] == 'rv' else np.array([]),
-                'rv2s': np.array(get_value(qualifier='rv2s', context='dataset', dataset=dataset, component='secondary')) if ds_meta['kind'] == 'rv' else np.array([]),
-            })
+                ds_meta = self._dataset_template.copy()
+                ds_meta.update({
+                    'kind': 'lc',
+                    'dataset': dataset,
+                    'passband': passband,
+                    'component': '',
+                    'times': times,
+                    'sigmas': sigmas,
+                    'fluxes': fluxes,
+                    'model_fluxes': model_fluxes,
+                    'data_points': len(times),
+                    'filename': 'From bundle' if len(times) > 0 else 'Synthetic',
+                    'n_points': phase_length or 201,
+                    'phase_min': phase_min or -0.5,
+                    'phase_max': phase_max or 0.5,
+                    'plot_data': False,
+                    'plot_model': False
+                })
+                self.datasets[dataset] = ds_meta
+            elif kind == 'rv':
+                # For RV: retrieve per-component data (if present) and keep single-component datasets
+                times_primary = get_value(qualifier='times', context='dataset', component='primary', dataset=dataset)
+                times_primary = np.array(times_primary) if times_primary is not None else np.array([])
+                times_secondary = get_value(qualifier='times', context='dataset', component='secondary', dataset=dataset)
+                times_secondary = np.array(times_secondary) if times_secondary is not None else np.array([])
 
-            # model-specific parameters:
-            ds_meta.update({
-                # FIXME: these should be taken from bundle if available
-                'n_points': 201,
-                'phase_min': -0.5,
-                'phase_max': 0.5,
-                'model_fluxes': np.array(get_value(qualifier='fluxes', context='model', dataset=dataset)) if ds_meta['kind'] == 'lc' else np.array([]),
-                'model_rv1s': np.array(get_value(qualifier='rvs', context='model', dataset=dataset, component='primary')) if ds_meta['kind'] == 'rv' else np.array([]),
-                'model_rv2s': np.array(get_value(qualifier='rvs', context='model', dataset=dataset, component='secondary')) if ds_meta['kind'] == 'rv' else np.array([]),
-                'plot_data': False,
-                'plot_model': False
-            })
+                rvs_primary = get_value(qualifier='rvs', context='dataset', dataset=dataset, component='primary')
+                rvs_primary = np.array(rvs_primary) if rvs_primary is not None else np.array([])
+                rvs_secondary = get_value(qualifier='rvs', context='dataset', dataset=dataset, component='secondary')
+                rvs_secondary = np.array(rvs_secondary) if rvs_secondary is not None else np.array([])
 
-            self.datasets[dataset] = ds_meta
+                model_rvs_primary = get_value(qualifier='rvs', context='model', dataset=dataset, component='primary')
+                model_rvs_primary = np.array(model_rvs_primary) if model_rvs_primary is not None else np.array([])
+                model_rvs_secondary = get_value(qualifier='rvs', context='model', dataset=dataset, component='secondary')
+                model_rvs_secondary = np.array(model_rvs_secondary) if model_rvs_secondary is not None else np.array([])
+
+                has_primary_data = len(rvs_primary) > 0 or len(times_primary) > 0
+                has_secondary_data = len(rvs_secondary) > 0 or len(times_secondary) > 0
+
+                rv_component = get_value(qualifier='rv_component', context='ui', dataset=dataset)
+
+                # Phase parameters (ui context)
+                phase_min = get_value(qualifier='phase_min', context='ui', dataset=dataset)
+                phase_max = get_value(qualifier='phase_max', context='ui', dataset=dataset)
+                phase_length = get_value(qualifier='phase_length', context='ui', dataset=dataset)
+
+                def build_ds(label_suffix, component, times_arr, rvs_arr, model_arr):
+                    ds_meta = self._dataset_template.copy()
+                    ds_meta.update({
+                        'kind': 'rv',
+                        'dataset': f"{dataset}{label_suffix}",
+                        'passband': passband,
+                        'component': component,
+                        'times': times_arr,
+                        'sigmas': sigmas,
+                        'rvs': rvs_arr,
+                        'model_rvs': model_arr,
+                        'data_points': len(times_arr),
+                        'filename': 'From bundle' if len(times_arr) > 0 else 'Synthetic',
+                        'n_points': phase_length if phase_length is not None else 201,
+                        'phase_min': phase_min if phase_min is not None else -0.5,
+                        'phase_max': phase_max if phase_max is not None else 0.5,
+                        'plot_data': False,
+                        'plot_model': False
+                    })
+                    self.datasets[ds_meta['dataset']] = ds_meta
+
+                if has_primary_data and has_secondary_data:
+                    if rv_component in ['primary', 'secondary']:
+                        if rv_component == 'primary':
+                            build_ds('', 'primary', times_primary, rvs_primary, model_rvs_primary)
+                        else:
+                            build_ds('', 'secondary', times_secondary, rvs_secondary, model_rvs_secondary)
+                    else:
+                        # Split into two datasets to avoid ambiguity
+                        build_ds('_primary', 'primary', times_primary, rvs_primary, model_rvs_primary)
+                        build_ds('_secondary', 'secondary', times_secondary, rvs_secondary, model_rvs_secondary)
+                elif has_primary_data:
+                    build_ds('', 'primary', times_primary, rvs_primary, model_rvs_primary)
+                elif has_secondary_data:
+                    build_ds('', 'secondary', times_secondary, rvs_secondary, model_rvs_secondary)
+                else:
+                    # Synthetic-only RV: keep empty arrays; component from UI if available
+                    component = rv_component if rv_component in ['primary', 'secondary'] else 'primary'
+                    build_ds('', component, np.array([]), np.array([]), model_rvs_primary if component == 'primary' else model_rvs_secondary)
+            else:
+                ui.notify(f'Unsupported dataset {dataset} kind {kind} in bundle, ignoring.')
 
     def sync_from_server(self):
         """Synchronize internal model from the server."""
@@ -497,34 +609,97 @@ class Dataset:
 
         # Populate model from bundle data
         for ds_label, ds_data in bundle_datasets.items():
-            dataset_meta = self._dataset_template.copy()
-            dataset_meta.update({
-                'kind': ds_data.get('kind', 'lc'),
-                'dataset': ds_label,
-                'passband': ds_data.get('passband', 'Johnson:V'),
-                'times': np.array(ds_data.get('times', [])) if ds_data.get('times') is not None else np.array([]),
-                'fluxes': np.array(ds_data.get('fluxes', [])) if ds_data.get('fluxes') is not None else np.array([]),
-                'rv1s': np.array(ds_data.get('rv1s', [])) if ds_data.get('rv1s') is not None else np.array([]),
-                'rv2s': np.array(ds_data.get('rv2s', [])) if ds_data.get('rv2s') is not None else np.array([]),
-                'sigmas': np.array(ds_data.get('sigmas', [])) if ds_data.get('sigmas') is not None else np.array([]),
-                'data_points': len(ds_data.get('times', [])) if ds_data.get('times') is not None else 0,
-                'filename': 'From server' if ds_data.get('times') else 'Synthetic',
-                'n_points': 201,
-                'phase_min': -0.5,
-                'phase_max': 0.5,
-                'model_fluxes': [],
-                'model_rv1s': [],
-                'model_rv2s': [],
-                'plot_data': False,
-                'plot_model': False
-            })
-            self.datasets[ds_label] = dataset_meta
+            kind = ds_data.get('kind', 'invalid')
+            times = np.array(ds_data.get('times', [])) if ds_data.get('times') is not None else np.array([])
+
+            if kind == 'lc':
+                dataset_meta = self._dataset_template.copy()
+                dataset_meta.update({
+                    'kind': 'lc',
+                    'dataset': ds_label,
+                    'passband': ds_data.get('passband', 'Johnson:V'),
+                    'component': '',
+                    'times': times,
+                    'fluxes': np.array(ds_data.get('fluxes', [])) if ds_data.get('fluxes') is not None else np.array([]),
+                    'sigmas': np.array(ds_data.get('sigmas', [])) if ds_data.get('sigmas') is not None else np.array([]),
+                    'data_points': len(times),
+                    'filename': 'From server' if len(times) > 0 else 'Synthetic',
+                    'n_points': 201,
+                    'phase_min': -0.5,
+                    'phase_max': 0.5,
+                    'model_fluxes': [],
+                    'plot_data': False,
+                    'plot_model': False
+                })
+                self.datasets[ds_label] = dataset_meta
+            elif kind == 'rv':
+                # RV data from server may come as dicts keyed by component or as arrays
+                times_data = ds_data.get('times', {})
+                rvs_data = ds_data.get('rvs', {})
+
+                # Handle both dict format (keyed by component) and array format
+                if isinstance(times_data, dict):
+                    times_primary = np.array(times_data.get('primary', []))
+                    times_secondary = np.array(times_data.get('secondary', []))
+                else:
+                    times_primary = np.array(times_data) if times_data is not None else np.array([])
+                    times_secondary = np.array([])
+
+                if isinstance(rvs_data, dict):
+                    rvs_primary = np.array(rvs_data.get('primary', []))
+                    rvs_secondary = np.array(rvs_data.get('secondary', []))
+                else:
+                    rvs_primary = np.array(rvs_data) if rvs_data is not None else np.array([])
+                    rvs_secondary = np.array([])
+
+                # Determine which component has data
+                has_primary_data = len(rvs_primary) > 0 or len(times_primary) > 0
+                has_secondary_data = len(rvs_secondary) > 0 or len(times_secondary) > 0
+
+                if has_primary_data:
+                    component = 'primary'
+                    times = times_primary
+                    rvs = rvs_primary
+                elif has_secondary_data:
+                    component = 'secondary'
+                    times = times_secondary
+                    rvs = rvs_secondary
+                else:
+                    # Synthetic - default to primary
+                    component = 'primary'
+                    times = np.array([])
+                    rvs = np.array([])
+
+                dataset_meta = self._dataset_template.copy()
+                dataset_meta.update({
+                    'kind': 'rv',
+                    'dataset': ds_label,
+                    'passband': ds_data.get('passband', 'Johnson:V'),
+                    'component': component,
+                    'times': times,
+                    'rvs': rvs,
+                    'sigmas': np.array(ds_data.get('sigmas', [])) if ds_data.get('sigmas') is not None else np.array([]),
+                    'data_points': len(times),
+                    'filename': 'imported' if len(times) > 0 else 'Synthetic',
+                    'n_points': 201,
+                    'phase_min': -0.5,
+                    'phase_max': 0.5,
+                    'model_rvs': [],
+                    'plot_data': False,
+                    'plot_model': False
+                })
+                self.datasets[ds_label] = dataset_meta
+            else:
+                ui.notify(f'Unsupported dataset {ds_label} received from the server, ignoring.')
 
     def _collect_from_dialog(self):
         """Collect dataset parameters from dialog widgets."""
+        kind = self.widgets['dataset_kind'].value
+
         params = {
-            'kind': self.widgets['dataset_kind'].value,
+            'kind': kind,
             'dataset': self.widgets['dataset_label'].value,
+            'component': self.widgets['dataset_component'].value if kind == 'rv' else 'binary',
             'passband': self.widgets['dataset_passband'].value,
             'n_points': int(self.widgets['dataset_n_points'].value),
             'phase_min': self.widgets['dataset_phase_min'].value,
@@ -536,7 +711,6 @@ class Dataset:
             params['filename'] = self.data_file
 
             if self.data_content:
-                data_content = self.data_content
                 data_content = np.genfromtxt(io.StringIO(self.data_content))
             else:
                 data_content = np.genfromtxt(self.data_file)
@@ -544,25 +718,26 @@ class Dataset:
             params['data_points'] = len(data_content)
             params['times'] = data_content[:, 0]
 
-            kind = params.get('kind', 'lc')
             if kind == 'lc':
                 params['fluxes'] = data_content[:, 1]
             elif kind == 'rv':
-                params['rv1s'] = data_content[:, 1]
-                params['rv2s'] = data_content[:, 1]  # TODO: handle separate RV components
+                params['rvs'] = data_content[:, 1]
 
-            params['sigmas'] = data_content[:, 2]
+            # Sigmas are optional (3rd column); default to empty if not present
+            if data_content.ndim == 2 and data_content.shape[1] >= 3:
+                params['sigmas'] = data_content[:, 2]
+            else:
+                params['sigmas'] = np.ones_like(params['times']) * 0.01  # Default small errors
         else:
             params['filename'] = 'Synthetic'
             params['data_points'] = 0
             # Initialize empty arrays for synthetic datasets
             params['times'] = []
-            params['sigmas'] = []
-            if params['kind'] == 'lc':
+            params['sigmas'] = np.ones_like(params['times']) * 0.01  # Default small errors
+            if kind == 'lc':
                 params['fluxes'] = []
-            elif params['kind'] == 'rv':
-                params['rv1s'] = []
-                params['rv2s'] = []
+            elif kind == 'rv':
+                params['rvs'] = []
 
         return params
 
@@ -590,6 +765,11 @@ class Dataset:
         self.widgets['dataset_phase_min'].value = dataset_meta.get('phase_min')
         self.widgets['dataset_phase_max'].value = dataset_meta.get('phase_max')
 
+        # Populate component for RV datasets
+        if dataset_meta.get('kind') == 'rv':
+            self.widgets['dataset_component'].value = dataset_meta.get('component')
+            self._update_component_visibility()
+
         # Disable label widget (can't change dataset designation)
         self.widgets['dataset_label'].disable()
 
@@ -608,6 +788,7 @@ class Dataset:
             row_data.append({
                 'label': ds_label,
                 'type': ds_meta['kind'],
+                'component': ds_meta['component'],
                 'passband': ds_meta['passband'],
                 'filename': ds_meta['filename'],
                 'phases': phases_str,
@@ -625,23 +806,24 @@ class Dataset:
             # Enhanced dataset control grid
             self.dataset_table = ui.aggrid({
                 'columnDefs': [
-                    {'field': 'label', 'headerName': 'Dataset', 'width': 120, 'sortable': True},
-                    {'field': 'type', 'headerName': 'Type', 'width': 60, 'sortable': True},
+                    {'field': 'label', 'headerName': 'Dataset', 'width': 100, 'sortable': True},
+                    {'field': 'type', 'headerName': 'Type', 'width': 50, 'sortable': True},
+                    {'field': 'component', 'headerName': 'Component', 'width': 60, 'sortable': True},
                     {'field': 'phases', 'headerName': 'Phases', 'width': 100, 'sortable': True},
-                    {'field': 'data_points', 'headerName': 'Data Points', 'width': 90, 'sortable': True, 'type': 'numericColumn'},
-                    {'field': 'passband', 'headerName': 'Passband', 'width': 100, 'sortable': True},
-                    {'field': 'filename', 'headerName': 'Source', 'width': 120, 'sortable': True},
+                    {'field': 'data_points', 'headerName': 'Pts', 'width': 60, 'sortable': True, 'type': 'numericColumn'},
+                    {'field': 'passband', 'headerName': 'Passband', 'width': 90, 'sortable': True},
+                    {'field': 'filename', 'headerName': 'Source', 'width': 100, 'sortable': True},
                     {
                         'field': 'plot_data',
-                        'headerName': 'Plot Data',
-                        'width': 90,
+                        'headerName': 'Data',
+                        'width': 70,
                         'cellRenderer': 'agCheckboxCellRenderer',
                         ':editable': 'params => { return params.data.filename !== "Synthetic"; }'
                     },
                     {
                         'field': 'plot_model',
-                        'headerName': 'Plot Model',
-                        'width': 90,
+                        'headerName': 'Model',
+                        'width': 70,
                         'cellRenderer': 'agCheckboxCellRenderer',
                         'editable': True
                     }
@@ -673,13 +855,22 @@ class Dataset:
             with ui.column().classes('w-full gap-4'):
                 self.widgets['dataset_kind'] = ui.select(
                     options={'lc': 'Light Curve', 'rv': 'RV Curve'},
-                    label='Dataset type'
+                    label='Dataset type',
+                    value='lc'
                 ).classes('w-full')
+                self.widgets['dataset_kind'].on('update:model-value', self._update_component_visibility)
 
                 self.widgets['dataset_label'] = ui.input(
                     label='Dataset Label',
                     placeholder='e.g., lc01, rv01, etc.',
                 ).classes('w-full')
+
+                # Component dropdown (only visible for RV datasets)
+                self.widgets['dataset_component'] = ui.select(
+                    options={'primary': 'Primary', 'secondary': 'Secondary'},
+                    label='Component',
+                    value='primary'
+                ).classes('w-full hidden')
 
                 self.widgets['dataset_passband'] = ui.select(
                     options=['GoChile:R', 'GoChile:G', 'GoChile:B', 'GoChile:L', 'TESS:T', 'Kepler:mean', 'Gaia:BP', 'Gaia:RP', 'Gaia:G', 'Gaia:RVS', 'Johnson:V'],
@@ -774,6 +965,14 @@ class Dataset:
         """Public method to refresh the table from model."""
         self._refresh_table()
 
+    def _update_component_visibility(self):
+        """Show/hide component dropdown based on dataset kind selection."""
+        kind = self.widgets['dataset_kind'].value
+        if kind == 'rv':
+            self.widgets['dataset_component'].classes(remove='hidden')
+        else:
+            self.widgets['dataset_component'].classes(add='hidden')
+
     def _on_add_clicked(self):
         """Handle Add button click."""
         # Reset to add mode
@@ -789,9 +988,13 @@ class Dataset:
         self.widgets['dataset_label'].value = f'ds{len(self.datasets)+1:02d}'
         self.widgets['dataset_label'].enable()
         self.widgets['dataset_passband'].value = 'Johnson:V'
+        self.widgets['dataset_component'].value = 'primary'
         self.widgets['dataset_n_points'].value = 201
         self.widgets['dataset_phase_min'].value = -0.5
         self.widgets['dataset_phase_max'].value = 0.5
+
+        # Reset component visibility
+        self._update_component_visibility()
 
         # Clear file upload state
         self.data_file = None
@@ -867,6 +1070,16 @@ class Dataset:
                 # Add new dataset
                 self.add(**model)
                 ui.notify(f'Dataset {model["dataset"]} added successfully', type='positive')
+
+            # Sync phase parameters to backend UI parameters for persistence
+            dataset = model['dataset']
+            self.client.set_value(twig=f'phase_min@{dataset}@ui', value=model['phase_min'])
+            self.client.set_value(twig=f'phase_max@{dataset}@ui', value=model['phase_max'])
+            self.client.set_value(twig=f'phase_length@{dataset}@ui', value=model['n_points'])
+
+            # Sync component parameter for RV datasets
+            if model['kind'] == 'rv':
+                self.client.set_value(twig=f'rv_component@{dataset}@ui', value=model['component'])
         except Exception as e:
             ui.notify(f'Error saving dataset: {e}', type='negative')
             return
@@ -934,10 +1147,13 @@ class PhoebeUI:
             with self.main_splitter.after:
                 self.create_analysis_panel()
 
-        # Handle plot resize on splitter change (plot is created lazily)
+        # Handle plot resize on splitter change (plots are created lazily)
         def resize_plot():
-            if self.lc_canvas is not None:
-                plot_id = self.lc_canvas.id
+            if self.plot_lc_canvas is not None:
+                plot_id = self.plot_lc_canvas.id
+                ui.run_javascript(f'Plotly.Plots.resize(getHtmlElement({plot_id}))')
+            if self.plot_rv_canvas is not None:
+                plot_id = self.plot_rv_canvas.id
                 ui.run_javascript(f'Plotly.Plots.resize(getHtmlElement({plot_id}))')
 
         self.main_splitter.on_value_change(resize_plot)
@@ -1156,6 +1372,14 @@ class PhoebeUI:
                 adjust=False,
             )
 
+            self.add_parameter(
+                qualifier='vgamma',
+                context='system',
+                label='Systemic velocity (km/s)',
+                step=1.0,
+                adjust=False
+            )
+
     def create_compute_panel(self):
         with ui.expansion('Model computation', icon='calculate', value=False).classes('w-full'):
 
@@ -1282,47 +1506,61 @@ class PhoebeUI:
                         icon='calculate'
                     ).classes('h-12 flex-shrink-0')
 
-    def create_lc_panel(self):
-        with ui.expansion('Light curve', icon='insert_chart', value=False).classes('w-full') as lc_expansion:
+    def create_plot_panel(self):
+        with ui.expansion('Plotting', icon='insert_chart', value=False).classes('w-full') as plot_expansion:
 
             with ui.column().classes('w-full h-full p-4 min-w-0'):
 
                 # Plot controls row
                 with ui.row().classes('gap-4 items-center mb-4'):
+                    # Plot type selector (LC or RV)
+                    self.widgets['plot_type'] = ui.select(
+                        options={'lc': 'Light Curve', 'rv': 'RV Curve'},
+                        value='lc',
+                        label='Plot type'
+                    ).classes('w-32 h-10')
+                    self.widgets['plot_type'].on('update:model-value', self.on_plot_type_changed)
+
                     # X-axis dropdown
-                    self.widgets['lc_plot_x_axis'] = ui.select(
+                    self.widgets['plot_x_axis'] = ui.select(
                         options={'time': 'Time', 'phase': 'Phase'},
                         value='time',
                         label='X-axis'
                     ).classes('w-24 h-10')
-                    self.widgets['lc_plot_x_axis'].on('update:model-value', lambda: self.on_lc_plot_update())
+                    self.widgets['plot_x_axis'].on('update:model-value', lambda: self.on_plot_update())
 
-                    # Y-axis dropdown
-                    self.widgets['lc_plot_y_axis'] = ui.select(
+                    # Y-axis dropdown (only visible for LC plots)
+                    self.widgets['plot_y_axis'] = ui.select(
                         options={'magnitude': 'Magnitude', 'flux': 'Flux'},
                         value='flux',
                         label='Y-axis'
                     ).classes('w-24 h-10')
-                    self.widgets['lc_plot_y_axis'].on('update:model-value', lambda: self.on_lc_plot_update())
+                    self.widgets['plot_y_axis'].on('update:model-value', lambda: self.on_plot_update())
 
                     # Legend checkbox
-                    self.widgets['lc_plot_legend'] = ui.checkbox('Legend', value=False).classes('translate-y-4')
-                    self.widgets['lc_plot_legend'].on('update:model-value', lambda: self.on_lc_plot_update())
+                    self.widgets['plot_legend'] = ui.checkbox('Legend', value=False).classes('translate-y-4')
+                    self.widgets['plot_legend'].on('update:model-value', lambda: self.on_plot_update())
 
                     # Plot button, styled for alignment
-                    self.plot_button = ui.button('Plot', on_click=self.on_lc_plot_button_clicked).classes('bg-blue-500 h-10 translate-y-4')
+                    self.plot_button = ui.button('Plot', on_click=self.on_plot_button_clicked).classes('bg-blue-500 h-10 translate-y-4')
 
-                # Container for plot canvas - created lazily on first expansion open
-                self.lc_canvas_container = ui.column().classes('w-full min-w-0')
-                self.lc_canvas = None
+                # Containers for plot canvases - created lazily on first expansion open
+                self.plot_lc_container = ui.column().classes('w-full min-w-0')
+                self.plot_lc_canvas = None
+                self.plot_rv_container = ui.column().classes('w-full min-w-0 hidden')
+                self.plot_rv_canvas = None
 
-        # Lazily create plot when expansion is first opened
+        # Lazily create plots when expansion is first opened
         def on_expansion_open():
-            if lc_expansion.value and self.lc_canvas is None:
-                with self.lc_canvas_container:
-                    self.lc_canvas = ui.plotly(self.create_empty_styled_lc_plot()).classes('w-full min-w-0')
+            if plot_expansion.value:
+                if self.plot_lc_canvas is None:
+                    with self.plot_lc_container:
+                        self.plot_lc_canvas = ui.plotly(self.create_empty_styled_plot('lc')).classes('w-full min-w-0')
+                if self.plot_rv_canvas is None:
+                    with self.plot_rv_container:
+                        self.plot_rv_canvas = ui.plotly(self.create_empty_styled_plot('rv')).classes('w-full min-w-0')
 
-        lc_expansion.on_value_change(on_expansion_open)
+        plot_expansion.on_value_change(on_expansion_open)
 
     def create_fitting_panel(self):
         with ui.expansion('Model fitting', icon='tune', value=False).classes('w-full'):
@@ -1392,11 +1630,11 @@ class PhoebeUI:
                     self.preview_solution_button.props('disabled')
                     self.adopt_solution_button.props('disabled')
 
-    def create_empty_styled_lc_plot(self):
+    def create_empty_styled_plot(self, plot_type='lc'):
         fig = go.Figure()
 
         x_title = 'Time (BJD)'
-        y_title = 'Flux'
+        y_title = 'Flux' if plot_type == 'lc' else 'RV (km/s)'
 
         fig.update_layout(
             xaxis_title=x_title,
@@ -1437,38 +1675,63 @@ class PhoebeUI:
 
         return fig
 
-    def on_lc_plot_update(self):
-        # Handle updates to the light curve plot
-        return
+    def on_plot_type_changed(self):
+        """Handle plot type dropdown change - toggle canvas visibility and y-axis options."""
+        plot_type = self.widgets['plot_type'].value
 
-    def create_lc_figure(self, preview_model_data: dict | None = None):
+        if plot_type == 'lc':
+            # Show LC canvas, hide RV canvas
+            self.plot_lc_container.classes(remove='hidden')
+            self.plot_rv_container.classes(add='hidden')
+            # Update y-axis options for LC
+            self.widgets['plot_y_axis'].options = {'magnitude': 'Magnitude', 'flux': 'Flux'}
+            self.widgets['plot_y_axis'].value = 'flux'
+        else:
+            # Show RV canvas, hide LC canvas
+            self.plot_rv_container.classes(remove='hidden')
+            self.plot_lc_container.classes(add='hidden')
+            # Update y-axis options for RV
+            self.widgets['plot_y_axis'].options = {'rv': 'RV (km/s)'}
+            self.widgets['plot_y_axis'].value = 'rv'
+
+    def on_plot_update(self):
+        # Handle updates to the plot settings (called on dropdown/checkbox changes)
+        pass
+
+    def create_figure(self, plot_type='lc', preview_model_data: dict | None = None):
         """
-        Create a light curve figure with current data and model.
+        Create a figure with current data and model for the specified plot type.
 
         Args:
+            plot_type: 'lc' for light curve, 'rv' for radial velocity
             preview_model_data: Optional dict of model data for preview mode.
-                               If provided, uses this data instead of stored model_fluxes.
+                               If provided, uses this data instead of stored model data.
                                Format: {ds_label: {'fluxes': [...], ...}, ...}
 
         Returns:
             Plotly Figure object
         """
-        fig = self.create_empty_styled_lc_plot()
+        fig = self.create_empty_styled_plot(plot_type)
 
         # Update axis labels based on dropdown selections
-        x_axis = self.widgets['lc_plot_x_axis'].value
-        y_axis = self.widgets['lc_plot_y_axis'].value
+        x_axis = self.widgets['plot_x_axis'].value
 
-        x_title = 'Phase' if x_axis == 'phase' else 'Time (BJD)'
-        y_title = 'Magnitude' if y_axis == 'magnitude' else 'Flux'
+        if plot_type == 'lc':
+            y_axis = self.widgets['plot_y_axis'].value
+            x_title = 'Phase' if x_axis == 'phase' else 'Time (BJD)'
+            y_title = 'Magnitude' if y_axis == 'magnitude' else 'Flux'
+        else:  # rv
+            y_axis = 'rv'
+            x_title = 'Phase' if x_axis == 'phase' else 'Time (BJD)'
+            y_title = 'RV (km/s)'
 
         # Update layout with correct axis titles and y-axis direction for magnitude
         layout_updates = {
             'xaxis_title': x_title,
             'yaxis_title': y_title,
-            'showlegend': self.widgets['lc_plot_legend'].value
+            'showlegend': self.widgets['plot_legend'].value
         }
-        if y_axis == 'magnitude':
+        if plot_type == 'lc' and y_axis == 'magnitude':
             layout_updates['yaxis_autorange'] = 'reversed'
 
         fig.update_layout(**layout_updates)
@@ -1476,108 +1739,144 @@ class PhoebeUI:
         period = self.parameters['period@binary@orbit@component'].get_value()
         t0 = self.parameters['t0_supconj@binary@orbit@component'].get_value()
 
-        # See what needs to be plotted:
+        # Filter datasets by plot type and plot them
         dataset_index = 0
         for ds_label, ds_meta in self.dataset.datasets.items():
-            if ds_meta['kind'] == 'lc':
-                # Get color scheme for this dataset
-                color_idx = dataset_index % len(DATASET_COLORS)
-                cycle_idx = dataset_index // len(DATASET_COLORS)
-                colors = DATASET_COLORS[color_idx]
-                marker_symbol = MARKER_SYMBOLS[cycle_idx % len(MARKER_SYMBOLS)]
-                line_dash = LINE_DASHES[cycle_idx % len(LINE_DASHES)]
+            # Only plot datasets matching the current plot type
+            if ds_meta['kind'] != plot_type:
+                continue
 
-                if ds_meta['plot_data']:
-                    if x_axis == 'time':
-                        xs = ds_meta['times']
-                    else:
-                        xs = time_to_phase(ds_meta['times'], period, t0)
+            # Get color scheme for this dataset
+            color_idx = dataset_index % len(DATASET_COLORS)
+            cycle_idx = dataset_index // len(DATASET_COLORS)
+            colors = DATASET_COLORS[color_idx]
+            marker_symbol = MARKER_SYMBOLS[cycle_idx % len(MARKER_SYMBOLS)]
+            line_dash = LINE_DASHES[cycle_idx % len(LINE_DASHES)]
 
+            if ds_meta['plot_data']:
+                if x_axis == 'time':
+                    xs = ds_meta['times']
+                else:
+                    xs = time_to_phase(ds_meta['times'], period, t0)
+
+                # Get y-values based on dataset type
+                if plot_type == 'lc':
                     if y_axis == 'flux':
                         ys = ds_meta['fluxes']
                     else:
                         ys = flux_to_magnitude(ds_meta['fluxes'])
+                else:  # rv
+                    component = ds_meta.get('component')
+                    if component == 'primary':
+                        ys = ds_meta['rvs']
+                    else:
+                        ys = ds_meta['rvs']
 
-                    data = np.column_stack((xs, ys))  # we could also add sigmas here
+                if len(xs) == 0 or len(ys) == 0:
+                    continue
 
-                    # Alias phases:
-                    if x_axis == 'phase':
-                        data = alias_data(data, extend_range=0.1)
+                data = np.column_stack((xs, ys))
 
-                    fig.add_trace(go.Scatter(
-                        x=data[:, 0],
-                        y=data[:, 1],
-                        mode='markers',
-                        marker={'color': colors['data'], 'symbol': marker_symbol},
-                        name=ds_label
-                    ))
+                # Alias phases:
+                if x_axis == 'phase':
+                    data = alias_data(data, extend_range=0.1)
 
-                if ds_meta['plot_model']:
-                    # Use preview model data if provided, otherwise use stored model
+                fig.add_trace(go.Scatter(
+                    x=data[:, 0],
+                    y=data[:, 1],
+                    mode='markers',
+                    marker={'color': colors['data'], 'symbol': marker_symbol},
+                    name=ds_label
+                ))
+
+            if ds_meta['plot_model']:
+                # Get model data based on dataset type
+                if plot_type == 'lc':
                     if preview_model_data is not None and ds_label in preview_model_data:
-                        model_fluxes = np.array(preview_model_data[ds_label].get('fluxes', []))
+                        model_ys = np.array(preview_model_data[ds_label].get('fluxes', []))
                     else:
-                        model_fluxes = np.array(ds_meta['model_fluxes'])
-
-                    if len(model_fluxes) == 0:
-                        ui.notify(f'No model fluxes available for dataset {ds_label}. Please compute the model first.', type='warning')
-                        continue
-
-                    # Generate phase grid matching model data length
-                    n_model_points = len(model_fluxes)
-                    compute_phases = np.linspace(ds_meta['phase_min'], ds_meta['phase_max'], n_model_points)
-
-                    if y_axis == 'flux':
-                        ys = model_fluxes
-                    else:
-                        ys = flux_to_magnitude(model_fluxes)
-
-                    if x_axis == 'time':
-                        # Tile model across full time span of data
-                        if ds_meta['plot_data'] and len(ds_meta['times']) > 0:
-                            t_min = np.min(ds_meta['times'])
-                            t_max = np.max(ds_meta['times'])
-                            # Calculate which cycles we need to cover
-                            cycle_min = int(np.floor((t_min - t0) / period))
-                            cycle_max = int(np.ceil((t_max - t0) / period))
-                            # Build tiled model
-                            all_xs = []
-                            all_ys = []
-                            for cycle in range(cycle_min, cycle_max + 1):
-                                cycle_times = t0 + period * (compute_phases + cycle)
-                                all_xs.extend(cycle_times)
-                                all_ys.extend(ys)
-                            xs = np.array(all_xs)
-                            ys = np.array(all_ys)
-                            # Trim to exact data time range
-                            mask = (xs >= t_min) & (xs <= t_max)
-                            xs = xs[mask]
-                            ys = ys[mask]
+                        model_ys = np.array(ds_meta['model_fluxes'])
+                else:  # rv
+                    component = ds_meta.get('component')
+                    if preview_model_data is not None and ds_label in preview_model_data:
+                        if component == 'primary':
+                            model_ys = np.array(preview_model_data[ds_label].get('rvs', []))
                         else:
-                            xs = t0 + period * compute_phases
+                            model_ys = np.array(preview_model_data[ds_label].get('rvs', []))
                     else:
-                        xs = compute_phases
+                        if component == 'primary':
+                            model_ys = np.array(ds_meta['model_rvs'])
+                        else:
+                            model_ys = np.array(ds_meta['model_rvs'])
 
-                    model = np.column_stack((xs, ys))
+                if len(model_ys) == 0:
+                    kind_label = 'fluxes' if plot_type == 'lc' else 'RVs'
+                    ui.notify(f'No model {kind_label} available for dataset {ds_label}. Please compute the model first.', type='warning')
+                    continue
 
-                    if x_axis == 'phase':
-                        model = alias_data(model, extend_range=0.1)
+                # Generate phase grid matching model data length
+                n_model_points = len(model_ys)
+                compute_phases = np.linspace(ds_meta['phase_min'], ds_meta['phase_max'], n_model_points)
 
-                    fig.add_trace(go.Scatter(
-                        x=model[:, 0],
-                        y=model[:, 1],
-                        mode='lines',
-                        line={'color': colors['model'], 'dash': line_dash},
-                        name=ds_label
-                    ))
+                # Apply magnitude conversion for LC if needed
+                if plot_type == 'lc' and y_axis == 'magnitude':
+                    ys = flux_to_magnitude(model_ys)
+                else:
+                    ys = model_ys
 
-                dataset_index += 1
+                if x_axis == 'time':
+                    # Tile model across full time span of data
+                    if ds_meta['plot_data'] and len(ds_meta['times']) > 0:
+                        t_min = np.min(ds_meta['times'])
+                        t_max = np.max(ds_meta['times'])
+                        # Calculate which cycles we need to cover
+                        cycle_min = int(np.floor((t_min - t0) / period))
+                        cycle_max = int(np.ceil((t_max - t0) / period))
+                        # Build tiled model
+                        all_xs = []
+                        all_ys = []
+                        for cycle in range(cycle_min, cycle_max + 1):
+                            cycle_times = t0 + period * (compute_phases + cycle)
+                            all_xs.extend(cycle_times)
+                            all_ys.extend(ys)
+                        xs = np.array(all_xs)
+                        ys = np.array(all_ys)
+                        # Trim to exact data time range
+                        mask = (xs >= t_min) & (xs <= t_max)
+                        xs = xs[mask]
+                        ys = ys[mask]
+                    else:
+                        xs = t0 + period * compute_phases
+                else:
+                    xs = compute_phases
+
+                model = np.column_stack((xs, ys))
+
+                if x_axis == 'phase':
+                    model = alias_data(model, extend_range=0.1)
+
+                fig.add_trace(go.Scatter(
+                    x=model[:, 0],
+                    y=model[:, 1],
+                    mode='lines',
+                    line={'color': colors['model'], 'dash': line_dash},
+                    name=ds_label
+                ))
+
+            dataset_index += 1
 
         return fig
 
-    async def on_lc_plot_button_clicked(self):
-        """Redraw the light curve plot with current data and model."""
-        if self.lc_canvas is None:
+    async def on_plot_button_clicked(self):
+        """Redraw the current plot with data and model."""
+        plot_type = self.widgets.get('plot_type', None)
+        if plot_type is not None:
+            plot_type = plot_type.value
+        else:
+            plot_type = 'lc'  # Default to LC if not yet initialized
+
+        canvas = self.plot_lc_canvas if plot_type == 'lc' else self.plot_rv_canvas
+        if canvas is None:
             return
 
         try:
@@ -1586,11 +1885,11 @@ class PhoebeUI:
 
             # Run the plotting operation asynchronously to avoid blocking the UI with large datasets
             fig = await get_event_loop().run_in_executor(
-                None, lambda: self.create_lc_figure()
+                None, lambda: self.create_figure(plot_type)
             )
 
-            self.lc_canvas.figure = fig
-            self.lc_canvas.update()
+            canvas.figure = fig
+            canvas.update()
         except Exception as e:
             ui.notify(f"Error plotting data: {str(e)}", type='negative')
         finally:
@@ -1605,8 +1904,8 @@ class PhoebeUI:
             # Compute management panel:
             self.create_compute_panel()
 
-            # Light curve plot (pass reference to UI for parameter access)
-            self.create_lc_panel()
+            # Plotting panel (LC and RV)
+            self.create_plot_panel()
 
             # Fitting panel:
             self.create_fitting_panel()
@@ -1614,11 +1913,11 @@ class PhoebeUI:
     async def on_ephemeris_changed(self, param_name=None, param_value=None):
         """Handle changes to ephemeris parameters (t0, period) and update phase plot."""
         # Only replot if we're currently showing phase on x-axis or if there's any data to plot
-        if self.widgets['lc_plot_x_axis'].value == 'phase' or any(
+        if self.widgets['plot_x_axis'].value == 'phase' or any(
             ds_meta.get('plot_data', False) or ds_meta.get('plot_model', False)
-            for ds_meta in self.dataset.datasets.values() if ds_meta['kind'] == 'lc'
+            for ds_meta in self.dataset.datasets.values()
         ):
-            await self.on_lc_plot_button_clicked()
+            await self.on_plot_button_clicked()
 
     async def sync_ui_state(self, **kwargs):
         """Sync UI state with backend Phoebe."""
@@ -1645,6 +1944,8 @@ class PhoebeUI:
                     value = param.get('value')
                     if value is not None:
                         param_widget.set_value(value)
+                else:
+                    raise ValueError(f'Parameter {param_widget.twig} not found in provided pset')
 
             # sync datasets from pset:
             self.dataset.sync_from_pset(pset=pset)
@@ -1690,15 +1991,28 @@ class PhoebeUI:
                 model_data = response['result'].get('model', {})
 
                 for ds_label, ds_meta in self.dataset.datasets.items():
-                    if ds_label in model_data:
-                        ds_data = model_data[ds_label]
-                        ds_meta['model_fluxes'] = ds_data.get('fluxes', [])
-                        ds_meta['model_rv1s'] = ds_data.get('rv1s', [])
-                        ds_meta['model_rv2s'] = ds_data.get('rv2s', [])
+                    # For RV datasets, the backend returns data keyed by the original dataset name
+                    backend_ds_label = ds_meta.get('dataset', ds_label)
+
+                    if backend_ds_label in model_data:
+                        ds_data = model_data[backend_ds_label]
+                        if ds_meta['kind'] == 'lc':
+                            ds_meta['model_fluxes'] = ds_data.get('fluxes', [])
+                        elif ds_meta['kind'] == 'rv':
+                            component = ds_meta.get('component')
+                            if component == 'primary':
+                                ds_meta['model_rvs'] = ds_data.get('rvs_primary', [])
+                            else:
+                                ds_meta['model_rvs'] = ds_data.get('rvs_secondary', [])
+                        else:
+                            ui.notify(f"Unknown dataset kind '{ds_meta['kind']}' for dataset '{ds_label}'", type='warning')
                     else:
-                        ds_meta['model_fluxes'] = []
-                        ds_meta['model_rv1s'] = []
-                        ds_meta['model_rv2s'] = []
+                        if ds_meta['kind'] == 'lc':
+                            ds_meta['model_fluxes'] = []
+                        elif ds_meta['kind'] == 'rv':
+                            ds_meta['model_rvs'] = []
+                        else:
+                            ui.notify(f"Unknown dataset kind '{ds_meta['kind']}' for dataset '{ds_label}'", type='warning')
 
                 ui.notify('Model computed successfully!', type='positive')
             else:
@@ -1849,14 +2163,14 @@ class PhoebeUI:
                     # Before plot (current model)
                     with ui.column().classes('flex-1'):
                         ui.label('Before (Current Parameters)').classes('text-lg font-semibold mb-2 text-center')
-                        before_fig = self.create_lc_figure()
+                        before_fig = self.create_figure('lc')
                         before_fig.update_layout(height=350, title=None)
                         ui.plotly(before_fig).classes('w-full')
 
                     # After plot (preview with fitted parameters)
                     with ui.column().classes('flex-1'):
                         ui.label('After (Fitted Parameters)').classes('text-lg font-semibold mb-2 text-center')
-                        after_fig = self.create_lc_figure(preview_model_data=preview_model_data)
+                        after_fig = self.create_figure('lc', preview_model_data=preview_model_data)
                         after_fig.update_layout(height=350, title=None)
                         ui.plotly(after_fig).classes('w-full')
 
@@ -1920,9 +2234,10 @@ class PhoebeUI:
 
             # Clear model data since parameters have changed
             for ds_label, ds_meta in self.dataset.datasets.items():
-                ds_meta['model_fluxes'] = []
-                ds_meta['model_rv1s'] = []
-                ds_meta['model_rv2s'] = []
+                if ds_meta['kind'] == 'lc':
+                    ds_meta['model_fluxes'] = []
+                else:
+                    ds_meta['model_rvs'] = []
 
             # Disable adopt solution button:
             self.preview_solution_button.props('disabled')
@@ -2072,7 +2387,7 @@ class PhoebeUI:
         }
 
 
-def attach_ui_parameters(phoebe_client: PhoebeClient, backend=None, morphology=None, phase_min=None, phase_max=None, phase_length=None):
+def attach_ui_parameters(phoebe_client: PhoebeClient, backend=None, morphology=None, phase_min=None, phase_max=None, phase_length=None, rv_component=None):
     parameters = [
         {
             'ptype': 'string',
@@ -2123,6 +2438,16 @@ def attach_ui_parameters(phoebe_client: PhoebeClient, backend=None, morphology=N
             'description': 'Number of phase points for light curve plots',
             'context': 'ui',
             'copy_for': {'kind': ['lc', 'rv'], 'dataset': '*'},
+            'dataset': '_default'
+        },
+        {
+            'ptype': 'choice',
+            'qualifier': 'rv_component',
+            'value': rv_component or 'primary',
+            'choices': ['primary', 'secondary'],
+            'description': 'Component for radial velocity datasets',
+            'context': 'ui',
+            'copy_for': {'kind': ['rv'], 'dataset': '*'},
             'dataset': '_default'
         }
     ]

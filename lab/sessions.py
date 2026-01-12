@@ -223,8 +223,6 @@ class LoginDialog(PhoebeDialog):
                     'Back',
                     on_click=self.on_back
                 ).classes('flex-1 bg-gray-600 text-white').props('size=lg')
-            
-
 
         return block
 
@@ -281,7 +279,7 @@ class SessionDialog(PhoebeDialog):
         self.on_session_activated = on_session_activated
         self.sessions = sessions if sessions is not None else {}
         self.create()
-        
+
         # Populate sessions if provided, otherwise refresh from server
         if sessions:
             self._populate_from_sessions()
