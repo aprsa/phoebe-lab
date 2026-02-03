@@ -99,7 +99,8 @@ class PhoebeParameterWidget:
         if response['success']:
             self.set_sensitive(not response['result'])
 
-        self.widget.on('change', self.on_value_changed)
+        # self.widget.on('change', self.on_value_changed)
+        self.widget.on_value_change(self.on_value_changed)
 
     def _widget_layout(self, par, value, label, format, classes):
         """Create and return the widget based on parameter type. Override in derived classes."""
@@ -1241,7 +1242,7 @@ class PhoebeUI:
             context='ui',
             label='Binary star morphology type',
             client=self.client,
-            ui_hook=self.sync_ui_state,
+            ui_hook=self.on_morphology_changed,
             classes='w-full mb-4'
         )
 
@@ -1920,7 +1921,7 @@ class PhoebeUI:
             await self.on_plot_button_clicked()
 
     async def sync_ui_state(self, **kwargs):
-        """Sync UI state with backend Phoebe."""
+        """Syncs UI state with PHOEBE server."""
         if not self.client:
             return
 
@@ -1954,24 +1955,78 @@ class PhoebeUI:
 
         self.dataset.refresh()
 
-    def update_morphology(self, new_morphology):
-        # change morphology in the backend:
-        self.client.change_morphology(morphology=new_morphology)
+    def filter(self, pset, qualifier=None, context=None, component=None, dataset=None, kind=None, uniqueid=None):
+        # this mimics PHOEBE's filter() ParameterSet method.
+        filtered_pset = []
 
-        # cycle through all phoebe parameters defined in the UI:
-        for param_widget in self.parameters.values():
-            # disable parameters if they're constrained:
-            response = self.client.is_parameter_constrained(uniqueid=param_widget.uniqueid)
+        for par in pset:
+            if qualifier and par.get('qualifier', None) and qualifier != par.get('qualifier'):
+                continue
+            if context and par.get('context', None) and context != par.get('context', None):
+                continue
+            if component and par.get('component', None) and component != par.get('component', None):
+                continue
+            if dataset and par.get('dataset', None) and dataset != par.get('dataset', None):
+                continue
+            if kind and par.get('kind', None) and kind != par.get('kind', None):
+                continue
+            if uniqueid and par.get('uniqueid', None) and uniqueid != par.get('uniqueid', None):
+                continue
+
+            filtered_pset.append(par)
+
+        if len(filtered_pset) == 1:
+            return filtered_pset[0]
+
+        raise ValueError(f'{len(filtered_pset)} parameters found with matching tags: {filtered_pset}.')
+
+    async def on_morphology_changed(self, new_morphology):
+        print('entered on_morphology_changed')
+        self.client.set_morphology(morphology=new_morphology)
+
+        # preserve project name and backend:
+        project_name = self.parameters['project_name@ui'].get_value()
+        backend = self.parameters['backend@ui'].get_value()
+        # TODO: do we want to preserve other UI parameters?
+        attach_ui_parameters(self.client, project_name=project_name, backend=backend, morphology=new_morphology)
+
+        # get the new bundle from the server:
+        response = self.client.get_bundle()
+        if response.get('success', False):
+            pset = json.loads(response['result'].get('bundle'))
+            # FIXME: UI parameters are doubled!
+        else:
+            raise RuntimeError('failed to fetch the new bundle from the server.')
+
+        # iterate over UI parameters and update their uniqueids:
+        for widget in self.parameters.values():
+            match = self.filter(
+                pset,
+                qualifier=widget.qualifier,
+                context=widget.context,
+                component=widget.component,
+                dataset=widget.dataset,
+                kind=widget.kind
+            )
+
+            # no need to check if match succeeded, filter() does that already.
+            widget.uniqueid = match.get('uniqueid')
+
+            # display or hide widgets based on parameter constraint:
+            response = self.client.is_parameter_constrained(uniqueid=widget.uniqueid)
             if response['success']:
                 constrained = response['result']
-                param_widget.set_visible(not constrained)
+                widget.set_visible(not constrained)
+                # if constrained:
+                #     print(f'parameter {par.twig} hidden.')
             else:
-                constrained = False
-                ui.notify(f"Failed to check if parameter {param_widget.twig} is constrained", type='negative')
+                raise RuntimeError(f"Failed to check if parameter {widget.twig} is constrained")
 
-            # update the value:
+            # reset values to bundle defaults:
             if not constrained:
-                param_widget.on_value_changed(event=False)
+                widget.set_value(match.get('value'))
+
+        print(f'Morphology changed to {new_morphology.lower()}')
 
         # Readd all datasets:
         self.dataset.readd_all()
@@ -2387,12 +2442,12 @@ class PhoebeUI:
         }
 
 
-def attach_ui_parameters(phoebe_client: PhoebeClient, backend=None, morphology=None, phase_min=None, phase_max=None, phase_length=None, rv_component=None):
+def attach_ui_parameters(phoebe_client: PhoebeClient, project_name=None, backend=None, morphology=None, phase_min=None, phase_max=None, phase_length=None, rv_component=None):
     parameters = [
         {
             'ptype': 'string',
             'qualifier': 'project_name',
-            'value': 'Unnamed Project',
+            'value': project_name or 'Unnamed Project',
             'description': 'Name of the binary system / project',
             'context': 'ui'
         },
