@@ -1,5 +1,5 @@
 from dataclasses import dataclass, asdict, fields
-from nicegui import ui
+from nicegui import ui, app
 
 
 @dataclass
@@ -473,3 +473,75 @@ class SessionDialog(PhoebeDialog):
 
         except Exception as e:
             ui.notify(f'Failed to delete session: {str(e)}', color='negative')
+
+
+class PasswordProtected(PhoebeDialog):
+    """Password gate that guards access to another dialog."""
+
+    def __init__(self, guarded_dialog: PhoebeDialog, password: str,
+                 guard_enabled: bool = True, storage_key: str = 'session_manager_access'):
+        super().__init__(persistent=True)
+        self.guarded_dialog = guarded_dialog
+        self.password = password
+        self.guard_enabled = guard_enabled
+        self.storage_key = storage_key
+        self.password_input = None
+        self.error_label = None
+        self.create()
+
+    def __getattr__(self, name):
+        """Proxy unknown attributes to the guarded dialog."""
+        return getattr(self.guarded_dialog, name)
+
+    def has_access(self) -> bool:
+        if not self.guard_enabled or not self.password:
+            return True
+        return app.storage.user.get(self.storage_key, False)
+
+    def show(self):
+        """Show password prompt if needed, otherwise open guarded dialog directly."""
+        if self.has_access():
+            self.guarded_dialog.show()
+            return
+
+        if self.password_input:
+            self.password_input.value = ''
+        if self.error_label:
+            self.error_label.visible = False
+        super().show()
+
+    def create_title_block(self):
+        with ui.column().classes('w-full mb-4') as block:
+            ui.label('Session Manager Access').classes('text-lg font-semibold mb-2')
+            ui.label('Enter the access password to continue.').classes('text-sm text-gray-600')
+        return block
+
+    def create_content_block(self):
+        with ui.column().classes('w-full gap-3') as block:
+            self.password_input = ui.input(
+                'Password', password=True,
+                on_change=lambda: self._clear_error()
+            ).classes('w-full').props('outlined')
+            self.password_input.on('keydown.enter', self.confirm_access)
+            self.error_label = ui.label('').classes('text-red-500 text-sm')
+            self.error_label.visible = False
+        return block
+
+    def create_buttons_block(self):
+        with ui.row().classes('w-full gap-3 mt-4') as block:
+            ui.button('Cancel', on_click=self.hide).classes('flex-1 bg-gray-600 text-white')
+            ui.button('Continue', on_click=self.confirm_access).classes('flex-1 bg-blue-600 text-white')
+        return block
+
+    def confirm_access(self):
+        if self.password_input.value == self.password:
+            app.storage.user[self.storage_key] = True
+            self.hide()
+            self.guarded_dialog.show()
+        else:
+            self.error_label.text = 'Incorrect password'
+            self.error_label.visible = True
+
+    def _clear_error(self):
+        if self.error_label and self.error_label.visible:
+            self.error_label.visible = False

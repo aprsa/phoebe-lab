@@ -1,5 +1,6 @@
 import io
 import json
+import os
 from nicegui import ui
 from nicegui import app  # noqa: F401 - Required for storage_secret in ui.run()
 import numpy as np
@@ -7,9 +8,16 @@ import plotly.graph_objects as go
 from pathlib import Path
 from phoebe_client import PhoebeClient
 from lab.utils import time_to_phase, alias_data, flux_to_magnitude
-from lab.sessions import LoginDialog, SessionDialog, SessionInfo
+from lab.sessions import LoginDialog, SessionDialog, SessionInfo, PasswordProtected
 from asyncio import get_event_loop
 
+# Server connection configuration (can be overridden via environment variables)
+PHOEBE_SERVER_HOST = os.environ.get('PHOEBE_SERVER_HOST', 'localhost')
+PHOEBE_SERVER_PORT = int(os.environ.get('PHOEBE_SERVER_PORT', '8001'))
+SESSION_MANAGER_PASSWORD = os.environ.get('PHOEBE_SESSION_MANAGER_PASSWORD', 'M00n@2030')
+SESSION_MANAGER_GUARD_ENABLED = os.environ.get('PHOEBE_SESSION_MANAGER_GUARD', 'true').lower() in (
+    '1', 'true', 'yes', 'on'
+)
 
 # Color scheme for data/model plots: 10 high-contrast color combinations.
 # Each entry contains colors for data markers and model lines, plus symbol/dash
@@ -2514,7 +2522,8 @@ def main_page():
     """Main page for the Phoebe Lab UI with student identification."""
 
     # Initialize phoebe API client
-    client = PhoebeClient(host='localhost', port=8001)
+    # FIXME: trust phoebe.client with arguments from config.toml
+    client = PhoebeClient(host=PHOEBE_SERVER_HOST, port=PHOEBE_SERVER_PORT)
 
     main_window = ui.column().classes('w-full h-full items-center justify-start p-4 gap-4')
 
@@ -2570,8 +2579,14 @@ def main_page():
         on_session_activated=on_session_activated
     )
 
+    protected_session_dialog = PasswordProtected(
+        guarded_dialog=session_dialog,
+        password=SESSION_MANAGER_PASSWORD,
+        guard_enabled=SESSION_MANAGER_GUARD_ENABLED
+    )
+
     context_data = {
-        'session_dialog': session_dialog,
+        'session_dialog': protected_session_dialog,
         'login_dialog': login_dialog
     }
 
@@ -2580,7 +2595,7 @@ def main_page():
 
     # Route to appropriate dialog based on existing sessions
     if sessions:
-        session_dialog.show()
+        protected_session_dialog.show()
     else:
         login_dialog.show()
 
