@@ -45,7 +45,10 @@ Issues = "https://github.com/aprsa/phoebe.lab/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["lab*"]
+include = ["lab*", "examples*"]
+
+[tool.setuptools.package-data]
+examples = ["*"]
 
 [tool.black]
 line-length = 120

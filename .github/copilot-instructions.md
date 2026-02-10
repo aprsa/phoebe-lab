@@ -45,11 +45,24 @@ pytest && black lab/ && ruff check lab/ && mypy lab/
 - Y-axis dropdown hidden for RV (fixed to "RV (km/s)")
 
 ### Async Operations
-Long-running backend calls use executor pattern with button loading indicators:
+Long-running backend calls use NiceGUI's `run.io_bound()` with button loading indicators:
 ```python
+from nicegui import ui, run
+
 self.compute_button.props('loading')
-response = await get_event_loop().run_in_executor(None, lambda: self.client.run_compute(...))
+response = await run.io_bound(self.client.run_compute)
 self.compute_button.props(remove='loading')
+```
+Or with arguments:
+```python
+response = await run.io_bound(self.client.set_value, twig='period@binary', value=1.5)
+```
+`run.io_bound()` runs blocking I/O operations in a thread pool without blocking the NiceGUI event loop, keeping the UI responsive during long network calls. Async event handlers pass directly to UI element callbacks (NiceGUI handles execution):
+```python
+async def handle_delete():
+    await self.confirm_delete(session_id, dialog)
+
+ui.button('Delete', on_click=handle_delete)
 ```
 
 ### UI-Only Parameters

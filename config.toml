@@ -1,0 +1,16 @@
+# PHOEBE Lab Configuration
+
+[server]
+host = "localhost"  # hostname or IP of phoebe-server
+port = 8001         # port where phoebe-server is listening
+
+[access]
+enabled = false     # set to true to enable password gate to phoebe-lab
+password = ""       # password for phoebe-lab access
+
+[ui]
+host = "0.0.0.0"               # UI listen address
+port = 8002                    # UI listen port
+title = "PHOEBE Lab"           # Browser window title
+reconnect_timeout = 300        # Session reconnect timeout (seconds)
+storage_secret = "changeme"    # Storage encryption secret (CHANGE IN PRODUCTION)

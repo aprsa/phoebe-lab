@@ -1,23 +1,14 @@
 import io
 import json
-import os
-from nicegui import ui
+from nicegui import ui, run
 from nicegui import app  # noqa: F401 - Required for storage_secret in ui.run()
 import numpy as np
 import plotly.graph_objects as go
-from pathlib import Path
 from phoebe_client import PhoebeClient
+from lab.config import CONFIG, EXAMPLES_PATH
 from lab.utils import time_to_phase, alias_data, flux_to_magnitude
-from lab.sessions import LoginDialog, SessionDialog, SessionInfo, PasswordProtected
-from asyncio import get_event_loop
+from lab.sessions import StartSessionDialog, SessionManagerDialog, SessionInfo, PasswordProtected
 
-# Server connection configuration (can be overridden via environment variables)
-PHOEBE_SERVER_HOST = os.environ.get('PHOEBE_SERVER_HOST', 'localhost')
-PHOEBE_SERVER_PORT = int(os.environ.get('PHOEBE_SERVER_PORT', '8001'))
-SESSION_MANAGER_PASSWORD = os.environ.get('PHOEBE_SESSION_MANAGER_PASSWORD', 'M00n@2030')
-SESSION_MANAGER_GUARD_ENABLED = os.environ.get('PHOEBE_SESSION_MANAGER_GUARD', 'true').lower() in (
-    '1', 'true', 'yes', 'on'
-)
 
 # Color scheme for data/model plots: 10 high-contrast color combinations.
 # Each entry contains colors for data markers and model lines, plus symbol/dash
@@ -914,16 +905,16 @@ class Dataset:
                     with ui.tab_panel(example_tab):
                         ui.label('Select an example data file:').classes('mb-2')
 
-                        examples_dir = Path(__file__).parent.parent / 'examples'
                         example_files = []
 
-                        if examples_dir.exists():
-                            for file_path in examples_dir.glob('*'):
-                                example_files.append({
-                                    'name': file_path.name,
-                                    'path': str(file_path),
-                                    'description': '',
-                                })
+                        if EXAMPLES_PATH.is_dir():
+                            for file_path in EXAMPLES_PATH.iterdir():
+                                if file_path.is_file():
+                                    example_files.append({
+                                        'name': file_path.name,
+                                        'path': str(file_path),
+                                        'description': '',
+                                    })
 
                         if example_files:
                             example_cards = []
@@ -1893,9 +1884,7 @@ class PhoebeUI:
             self.plot_button.props('loading')
 
             # Run the plotting operation asynchronously to avoid blocking the UI with large datasets
-            fig = await get_event_loop().run_in_executor(
-                None, lambda: self.create_figure(plot_type)
-            )
+            fig = await run.io_bound(self.create_figure, plot_type)
 
             canvas.figure = fig
             canvas.update()
@@ -2046,9 +2035,7 @@ class PhoebeUI:
             self.compute_button.props('loading')
 
             # Run the compute operation asynchronously to avoid blocking the UI
-            response = await get_event_loop().run_in_executor(
-                None, lambda: self.client.run_compute()
-            )
+            response = await run.io_bound(self.client.run_compute)
 
             if response.get('success', False):
                 model_data = response['result'].get('model', {})
@@ -2103,9 +2090,7 @@ class PhoebeUI:
             self.fit_button.props('loading')
 
             # Run the compute operation asynchronously to avoid blocking the UI
-            response = await get_event_loop().run_in_executor(
-                None, lambda: self.client.run_solver()
-            )
+            response = await run.io_bound(self.client.run_solver)
 
             if response.get('success', False):
                 solution_data = response.get('result', {}).get('solution', {})
@@ -2206,9 +2191,7 @@ class PhoebeUI:
             self.preview_solution_button.props('loading')
 
             # Compute model with solution='latest' to get preview
-            response = await get_event_loop().run_in_executor(
-                None, lambda: self.client.run_compute(solution='latest')
-            )
+            response = await run.io_bound(self.client.run_compute, solution='latest')
 
             if not response.get('success', False):
                 ui.notify(f"Failed to compute preview: {response.get('error', 'Unknown error')}", type='negative')
@@ -2327,10 +2310,7 @@ class PhoebeUI:
             # Show loading indicator
             self.new_button.props('loading')
 
-            response = await get_event_loop().run_in_executor(
-                None,
-                lambda: self.client.new_bundle()
-            )
+            response = await run.io_bound(self.client.new_bundle)
 
             if response.get('success', False):
                 ui.notify('New model created successfully', type='positive')
@@ -2381,10 +2361,7 @@ class PhoebeUI:
                 ui.notify('Bundle upload failed', type='negative')
                 return
 
-            response = await get_event_loop().run_in_executor(
-                None,
-                lambda: self.client.load_bundle(bundle=file_content)
-            )
+            response = await run.io_bound(self.client.load_bundle, bundle=file_content)
 
             if response.get('success', False):
                 ui.notify(f'Bundle loaded from {filename}', type='positive')
@@ -2408,9 +2385,7 @@ class PhoebeUI:
             self.save_button.props('loading')
 
             # Get bundle content:
-            response = await get_event_loop().run_in_executor(
-                None, lambda: self.client.save_bundle()
-            )
+            response = await run.io_bound(self.client.save_bundle)
 
             if response.get('success', False):
                 # Get the bundle content from the response (may be wrapped in 'result')
@@ -2522,28 +2497,27 @@ def main_page():
     """Main page for the Phoebe Lab UI with student identification."""
 
     # Initialize phoebe API client
-    # FIXME: trust phoebe.client with arguments from config.toml
-    client = PhoebeClient(host=PHOEBE_SERVER_HOST, port=PHOEBE_SERVER_PORT)
+    client = PhoebeClient(host=CONFIG.server.host, port=CONFIG.server.port)
 
     main_window = ui.column().classes('w-full h-full items-center justify-start p-4 gap-4')
 
-    def on_session_activated(session_info: SessionInfo, context_data: dict):
+    async def on_session_activated(session_info: SessionInfo, context_data: dict):
         """Handle session activation (new or reconnected) and create main UI."""
 
         if session_info.is_new_session:
             # no existing session -- start a new one:
-            response = client.start_session(metadata=session_info.to_dict())
+            response = await run.io_bound(client.start_session, metadata=session_info.to_dict())
 
             # Update session_info with server response (session_id, etc.)
             session_info.update(response)
 
-            attach_ui_parameters(client)
+            await run.io_bound(attach_ui_parameters, client)
 
             # Set project name parameter value
-            client.set_value(twig='project_name@ui', value=session_info.project_name)
+            await run.io_bound(client.set_value, twig='project_name@ui', value=session_info.project_name)
         else:
             # Reconnecting to existing session - sync from server
-            sessions = client.get_sessions()
+            sessions = await run.io_bound(client.get_sessions)
             if session_info.session_id in sessions:
                 server_data = sessions[session_info.session_id]
                 session_info.update(server_data)
@@ -2551,7 +2525,7 @@ def main_page():
         # Update session dialog with current session
         session_dialog = context_data['session_dialog']
         session_dialog.current_session_id = session_info.session_id
-        session_dialog.refresh()
+        await session_dialog.refresh()
 
         # Create main UI
         main_window.clear()
@@ -2566,13 +2540,13 @@ def main_page():
     sessions = client.get_sessions()
 
     # Initialize dialogs:
-    login_dialog = LoginDialog(
+    login_dialog = StartSessionDialog(
         client=client,
         sessions=sessions,
         on_session_activated=on_session_activated
     )
 
-    session_dialog = SessionDialog(
+    session_dialog = SessionManagerDialog(
         client=client,
         sessions=sessions,
         current_session_id=None,
@@ -2580,9 +2554,9 @@ def main_page():
     )
 
     protected_session_dialog = PasswordProtected(
-        guarded_dialog=session_dialog,
-        password=SESSION_MANAGER_PASSWORD,
-        guard_enabled=SESSION_MANAGER_GUARD_ENABLED
+        session_dialog,
+        password=CONFIG.access.password,
+        guard_enabled=CONFIG.access.enabled
     )
 
     context_data = {
@@ -2601,15 +2575,14 @@ def main_page():
 
 
 def main():
-    """Main entry point for phoebe-lab CLI command."""
-
+    """Main entry point for phoebe-lab service."""
     ui.run(
-        host='0.0.0.0',
-        port=8082,
-        title='PHOEBE Lab UI',
+        host=CONFIG.ui.host,
+        port=CONFIG.ui.port,
+        title=CONFIG.ui.title,
         reload=False,
-        reconnect_timeout=300,
-        storage_secret='phoebe-lab-secret-key-change-in-production'  # Required for app.storage.user
+        reconnect_timeout=CONFIG.ui.reconnect_timeout,
+        storage_secret=CONFIG.ui.storage_secret
     )
 
 

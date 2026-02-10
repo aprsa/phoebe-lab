@@ -1,5 +1,6 @@
 from dataclasses import dataclass, asdict, fields
-from nicegui import ui, app
+from functools import partial
+from nicegui import ui, app, run
 
 
 @dataclass
@@ -158,8 +159,8 @@ class PhoebeDialog:
         self.dialog.clear()
 
 
-class LoginDialog(PhoebeDialog):
-    """Login/registration dialog for new sessions."""
+class StartSessionDialog(PhoebeDialog):
+    """Registration dialog for new sessions."""
 
     def __init__(self, client, sessions, on_session_activated):
         """
@@ -187,7 +188,7 @@ class LoginDialog(PhoebeDialog):
         with ui.column().classes('w-full gap-4') as block:
             self.project_name_input = ui.input(
                 'System/Project Name',
-                placeholder='Enter a name for your binary system',
+                placeholder='Enter a name for your project',
                 value='Unnamed Project'
             ).classes('w-full').props('outlined')
 
@@ -213,13 +214,13 @@ class LoginDialog(PhoebeDialog):
     def create_buttons_block(self):
         """Create action buttons."""
         with ui.row().classes('w-full gap-3 mt-4') as block:
-            ui.button(
+            self.start_button = ui.button(
                 'Start Session',
                 on_click=self.validate_and_create
             ).classes('flex-1 bg-blue-600 text-white').props('size=lg')
             # Back button only if sessions exist
             if self.sessions:
-                ui.button(
+                self.back_button = ui.button(
                     'Back',
                     on_click=self.on_back
                 ).classes('flex-1 bg-gray-600 text-white').props('size=lg')
@@ -231,7 +232,7 @@ class LoginDialog(PhoebeDialog):
         self.hide()
         self.context_data['session_dialog'].show()
 
-    def validate_and_create(self):
+    async def validate_and_create(self):
         """Validate inputs and create new session."""
         first_name = self.first_name_input.value.strip()
         last_name = self.last_name_input.value.strip()
@@ -249,18 +250,31 @@ class LoginDialog(PhoebeDialog):
             self.error_label.visible = True
             return
 
-        # Create session
-        session_info = SessionInfo(
-            first_name=first_name,
-            last_name=last_name,
-            email=email,
-            project_name=project_name
-        )
-        self.hide()
-        self.on_session_activated(session_info=session_info, context_data=self.context_data)
+        # self.start_button.disable()
+        self.start_button.props('loading')
+        if self.sessions:
+            self.back_button.disable()
+
+        try:
+            # Create session
+            session_info = SessionInfo(
+                first_name=first_name,
+                last_name=last_name,
+                email=email,
+                project_name=project_name
+            )
+
+            await self.on_session_activated(session_info=session_info, context_data=self.context_data)
+        finally:
+            # Now that the dialog is hidden, re-enable the buttons:
+            # self.start_button.enable()
+            self.start_button.props(remove='loading')
+            if self.sessions:
+                self.back_button.enable()
+            self.hide()
 
 
-class SessionDialog(PhoebeDialog):
+class SessionManagerDialog(PhoebeDialog):
     """Session management dialog for reconnecting/managing sessions."""
 
     def __init__(self, client, sessions=None, current_session_id=None, on_session_activated=None):
@@ -277,14 +291,12 @@ class SessionDialog(PhoebeDialog):
         self.client = client
         self.current_session_id = current_session_id
         self.on_session_activated = on_session_activated
-        self.sessions = sessions if sessions is not None else {}
+        self.sessions = sessions or {}
         self.create()
 
-        # Populate sessions if provided, otherwise refresh from server
+        # Populate sessions if provided
         if sessions:
             self._populate_from_sessions()
-        else:
-            self.refresh()
 
     def create_title_block(self):
         """Create the title."""
@@ -313,30 +325,30 @@ class SessionDialog(PhoebeDialog):
     def create_buttons_block(self):
         """Create action buttons."""
         with ui.row().classes('w-full gap-3 mt-4') as block:
-            ui.button(
+            self.new_button = ui.button(
                 'New',
                 on_click=self.on_new_session
             ).classes('flex-1 bg-blue-600 text-white').props('size=lg')
 
-            ui.button(
+            self.reconnect_button = ui.button(
                 'Reconnect',
                 on_click=self.on_reconnect_session
             ).classes('flex-1 bg-blue-600 text-white').props('size=lg')
 
-            ui.button(
+            self.delete_button = ui.button(
                 'Delete',
                 on_click=self.on_delete_session
             ).classes('flex-1 bg-red-600 text-white').props('size=lg')
 
-            ui.button(
+            self.close_button = ui.button(
                 'Close',
                 on_click=self.hide
             ).classes('flex-1 bg-gray-600 text-white').props('size=lg')
         return block
 
-    def refresh(self):
-        """Refresh the dialog with current data from server."""
-        self.sessions = self.client.get_sessions()
+    async def refresh(self):
+        """Refresh the dialog with current data from server (async)."""
+        self.sessions = await run.io_bound(self.client.get_sessions)
         self._populate_from_sessions()
 
     def _populate_from_sessions(self):
@@ -411,7 +423,7 @@ class SessionDialog(PhoebeDialog):
         self.hide()
         self.context_data['login_dialog'].show()
 
-    def on_reconnect_session(self):
+    async def on_reconnect_session(self):
         """Handle reconnecting to selected session."""
         selected_id = self.session_select.value
 
@@ -420,13 +432,24 @@ class SessionDialog(PhoebeDialog):
             self.hide()
             return
 
-        self.hide()
+        self.new_button.disable()
+        self.delete_button.disable()
+        self.close_button.disable()
+        self.reconnect_button.props('loading')
 
-        # Create SessionInfo and invoke callback to rebuild UI with new session
-        session_info = SessionInfo.from_dict(self.sessions.get(selected_id, {}))
-        ui.notify(f'Switching to session "{session_info.project_name}"', color='positive')
-        if self.on_session_activated:
-            self.on_session_activated(session_info=session_info, context_data=self.context_data)
+        try:
+            # Create SessionInfo and invoke callback to rebuild UI with new session
+            session_info = SessionInfo.from_dict(self.sessions.get(selected_id, {}))
+            ui.notify(f'Switching to session "{session_info.project_name}"', color='positive')
+            if self.on_session_activated:
+                await self.on_session_activated(session_info=session_info, context_data=self.context_data)
+        finally:
+            # self.reconnect_button.enable()
+            self.reconnect_button.props(remove='loading')
+            self.new_button.enable()
+            self.delete_button.enable()
+            self.close_button.enable()
+            self.hide()
 
     def on_delete_session(self):
         """Handle session deletion with confirmation."""
@@ -451,12 +474,12 @@ class SessionDialog(PhoebeDialog):
                 ui.button('Cancel', on_click=confirm_dialog.close).props('flat')
                 ui.button(
                     'Delete',
-                    on_click=lambda: self.confirm_delete(selected_id, confirm_dialog)
+                    on_click=partial(self.confirm_delete, selected_id, confirm_dialog)
                 ).props('flat color=negative')
 
         confirm_dialog.open()
 
-    def confirm_delete(self, session_id: str, confirm_dialog):
+    async def confirm_delete(self, session_id: str, confirm_dialog):
         """Execute session deletion after confirmation."""
         confirm_dialog.close()
 
@@ -464,11 +487,16 @@ class SessionDialog(PhoebeDialog):
             self.client.end_session(session_id)
             ui.notify('Session deleted successfully', color='positive')
 
-            self.refresh()
+            await self.refresh()
 
             if session_id == self.current_session_id:
                 self.hide()
                 ui.notify('Current session deleted, reloading...', color='info')
+                ui.navigate.to('/')
+
+            if not self.sessions:
+                # last session deleted
+                self.hide()
                 ui.navigate.to('/')
 
         except Exception as e:
