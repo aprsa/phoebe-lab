@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 from phoebe_client import PhoebeClient
 from lab.config import CONFIG, EXAMPLES_PATH
 from lab.utils import time_to_phase, alias_data, flux_to_magnitude
-from lab.sessions import StartSessionDialog, SessionManagerDialog, SessionInfo, PasswordProtected
+from lab.sessions import StartSessionDialog, SessionManagerDialog, SessionInfo, AuthLoginDialog, AuthRegisterDialog, PasswordProtected
 
 
 # Color scheme for data/model plots: 10 high-contrast color combinations.
@@ -1216,6 +1216,9 @@ class PhoebeUI:
             with ui.button(icon='menu').classes('bg-gray-700 text-white'):
                 with ui.menu():
                     ui.menu_item('Manage Sessions', on_click=self.on_manage_sessions)
+                    ui.menu_item('Account', on_click=self.on_account_management)
+                    ui.separator()
+                    ui.menu_item('Logout', on_click=self.on_logout)
 
         # Target/project name:
         self.parameters['project_name@ui'] = PhoebeParameterWidget(
@@ -2411,6 +2414,62 @@ class PhoebeUI:
         """Open session manager dialog to switch or manage sessions."""
         self.context_data['session_dialog'].show()
 
+    def on_account_management(self):
+        """Open account management dialog for profile and password changes."""
+        with ui.dialog() as account_dialog, ui.card().classes('w-[500px]'):
+            ui.label('Account Management').classes('text-2xl font-bold mb-4')
+
+            # Display user information
+            with ui.card().classes('w-full bg-gray-50 p-4 mb-4'):
+                ui.label('Current Account').classes('text-lg font-semibold mb-3')
+                user_info = self.get_user_info()
+                if self.session_info.full_name:
+                    ui.label(f"Name: {self.session_info.full_name}").classes('text-sm')
+                if hasattr(self.session_info, 'email'):
+                    ui.label(f"Email: {self.session_info.email}").classes('text-sm')
+
+            # Password change section (for future implementation)
+            with ui.expansion('Change Password', icon='lock').classes('w-full'):
+                ui.label('Password change coming soon...').classes('text-gray-600 text-sm')
+
+            # Dialog action buttons
+            ui.separator().classes('my-4')
+            with ui.row().classes('w-full gap-2 justify-end'):
+                ui.button('Close', on_click=account_dialog.close).props('flat')
+
+        account_dialog.open()
+
+    def on_logout(self):
+        """Handle user logout - confirm and then clear session."""
+        with ui.dialog() as confirm_dialog, ui.card():
+            ui.label('Logout?').classes('text-lg font-bold mb-2')
+            ui.label('You will be logged out and returned to the login screen.').classes('text-gray-600 mb-4')
+
+            with ui.row().classes('w-full gap-2 justify-end mt-4'):
+                ui.button('Cancel', on_click=confirm_dialog.close).props('flat')
+                ui.button('Logout', on_click=lambda: self._perform_logout(confirm_dialog)).classes('bg-red-600 text-white')
+
+        confirm_dialog.open()
+
+    def _perform_logout(self, dialog):
+        """Actually perform the logout - clear token and redirect to login."""
+        dialog.close()
+        
+        # Clear the JWT token from browser storage
+        if 'phoebe_token' in app.storage.user:
+            app.storage.user.pop('phoebe_token')
+        
+        # End the current session on the server
+        try:
+            if self.session_info.session_id:
+                self.client.end_session(self.session_info.session_id)
+        except Exception as e:
+            print(f'Warning: Could not end session on server: {e}')
+        
+        # Navigate back to login page
+        ui.navigate.to('/')
+        ui.notify('You have been logged out.', type='info')
+
     def get_user_info(self):
         """Get user information for logging or display purposes."""
         return self.session_info.full_name or "Unknown User"
@@ -2420,7 +2479,6 @@ class PhoebeUI:
         return {
             'session_id': self.session_info.session_id,
             'user_name': self.session_info.full_name,
-            'user_email': self.session_info.email,
             'session_active': not self.session_info.is_new_session
         }
 
@@ -2494,12 +2552,20 @@ def attach_ui_parameters(phoebe_client: PhoebeClient, project_name=None, backend
 
 @ui.page('/')
 def main_page():
-    """Main page for the Phoebe Lab UI with student identification."""
+    """Main page for the Phoebe Lab UI with auth-mode-aware session management."""
 
     # Initialize phoebe API client
     client = PhoebeClient(host=CONFIG.server.host, port=CONFIG.server.port)
 
     main_window = ui.column().classes('w-full h-full items-center justify-start p-4 gap-4')
+
+    # Discover server auth mode
+    try:
+        auth_config = client.get_auth_config()
+    except Exception:
+        auth_config = {"mode": "none"}
+
+    auth_mode = auth_config.get("mode", "none")
 
     async def on_session_activated(session_info: SessionInfo, context_data: dict):
         """Handle session activation (new or reconnected) and create main UI."""
@@ -2537,41 +2603,133 @@ def main_page():
                 context_data=context_data
             )
 
-    sessions = client.get_sessions()
+    # Will be set to the JWT auth login dialog when auth_mode == "jwt",
+    # so that session dialogs can offer a logout-to-login option.
+    jwt_auth_login = None
 
-    # Initialize dialogs:
-    login_dialog = StartSessionDialog(
-        client=client,
-        sessions=sessions,
-        on_session_activated=on_session_activated
-    )
+    def build_session_dialogs():
+        """Build session dialogs and show the appropriate one."""
+        sessions = client.get_sessions()
 
-    session_dialog = SessionManagerDialog(
-        client=client,
-        sessions=sessions,
-        current_session_id=None,
-        on_session_activated=on_session_activated
-    )
+        login_dialog = StartSessionDialog(
+            client=client,
+            sessions=sessions,
+            on_session_activated=on_session_activated
+        )
 
-    protected_session_dialog = PasswordProtected(
-        session_dialog,
-        password=CONFIG.access.password,
-        guard_enabled=CONFIG.access.enabled
-    )
+        session_dialog = SessionManagerDialog(
+            client=client,
+            sessions=sessions,
+            current_session_id=None,
+            on_session_activated=on_session_activated
+        )
 
-    context_data = {
-        'session_dialog': protected_session_dialog,
-        'login_dialog': login_dialog
-    }
+        context_data = {
+            'session_dialog': session_dialog,
+            'login_dialog': login_dialog,
+        }
 
-    login_dialog.attach_context_data(context_data)
-    session_dialog.attach_context_data(context_data)
+        # If JWT mode, include the auth login dialog so logout can return to it
+        if jwt_auth_login is not None:
+            context_data['auth_login'] = jwt_auth_login
 
-    # Route to appropriate dialog based on existing sessions
-    if sessions:
-        protected_session_dialog.show()
+        login_dialog.attach_context_data(context_data)
+        session_dialog.attach_context_data(context_data)
+
+        # Route to appropriate dialog based on existing sessions
+        if sessions:
+            session_dialog.show()
+        else:
+            login_dialog.show()
+
+    if auth_mode == "jwt":
+        # Server-managed users: show login/register before session flow
+        auth_login = AuthLoginDialog(client=client, on_authenticated=None)
+        auth_register = AuthRegisterDialog(client=client, on_authenticated=None)
+
+        # Make auth_login available to build_session_dialogs for logout support
+        jwt_auth_login = auth_login
+
+        async def on_authenticated():
+            """Called after successful JWT login/register. Build and show session dialogs."""
+            try:
+                build_session_dialogs()
+            except Exception as e:
+                ui.notify(f'Error after authentication: {str(e)}', type='negative')
+                print(f'Error in on_authenticated: {e}')
+
+        # Update dialog callbacks now that on_authenticated is defined
+        auth_login.on_authenticated = on_authenticated
+        auth_register.on_authenticated = on_authenticated
+
+        auth_context = {
+            'login_dialog': auth_login,
+            'register_dialog': auth_register,
+        }
+        auth_login.attach_context_data(auth_context)
+        auth_register.attach_context_data(auth_context)
+
+        # Check for existing token in browser storage
+        stored_token = app.storage.user.get('phoebe_token')
+        if stored_token:
+            client.set_token(stored_token)
+            try:
+                client.get_me()  # validate token still works
+                build_session_dialogs()
+            except Exception:
+                ui.notify('Session token expired. Please log in again.', type='warning')
+                app.storage.user.pop('phoebe_token', None)
+                auth_login.show()
+        else:
+            auth_login.show()
+
+    elif auth_mode == "password":
+        # Simple password gate at the lab level
+        # Build session dialogs first, then wrap the entry point with PasswordProtected
+        sessions = client.get_sessions()
+
+        login_dialog = StartSessionDialog(
+            client=client,
+            sessions=sessions,
+            on_session_activated=on_session_activated
+        )
+
+        session_dialog = SessionManagerDialog(
+            client=client,
+            sessions=sessions,
+            current_session_id=None,
+            on_session_activated=on_session_activated
+        )
+
+        context_data = {
+            'session_dialog': session_dialog,
+            'login_dialog': login_dialog,
+        }
+
+        login_dialog.attach_context_data(context_data)
+        session_dialog.attach_context_data(context_data)
+
+        # Determine which dialog to show (entry point)
+        entry_dialog = session_dialog if sessions else login_dialog
+
+        # Wrap with password gate
+        guarded = PasswordProtected(
+            guarded_dialog=entry_dialog,
+            password=CONFIG.ui.access_password,
+            guard_enabled=bool(CONFIG.ui.access_password),
+        )
+        guarded.show()
+
+    elif auth_mode == "external":
+        # External JWT: expect token in browser storage (set by upstream)
+        stored_token = app.storage.user.get('phoebe_token')
+        if stored_token:
+            client.set_token(stored_token)
+        build_session_dialogs()
+
     else:
-        login_dialog.show()
+        # "none" mode: no auth needed
+        build_session_dialogs()
 
 
 def main():

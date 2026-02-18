@@ -10,7 +10,7 @@ A NiceGUI web UI for PHOEBE Lab — inspect and fit eclipsing-binary models agai
 ## File Layout
 ```
 lab/phoebe_ui.py   # Main UI: PhoebeUI, Dataset, PhoebeParameterWidget, PhoebeAdjustableParameterWidget, main()
-lab/sessions.py    # SessionInfo dataclass, LoginDialog, SessionDialog, PhoebeDialog base class  
+lab/sessions.py    # SessionInfo dataclass, StartSessionDialog, SessionManagerDialog, AuthLoginDialog, AuthRegisterDialog, PasswordProtected, PhoebeDialog base class
 lab/utils.py       # Astronomy helpers: time_to_phase(), alias_data(), flux_to_magnitude()
 examples/          # Sample data files for upload dialog
 data/              # Bundle files and observation CSVs
@@ -97,3 +97,8 @@ Dataset.add(kind='rv', dataset='rv01', component='primary', passband='Johnson:V'
 - RV datasets: Each component (primary/secondary) is a separate UI dataset entry with its own `plot_data`/`plot_model` checkboxes
 - Color schemes: `DATASET_COLORS` list cycles through 6 data/model color pairs with `MARKER_SYMBOLS` and `LINE_DASHES`
 - Sessions: ~30min server timeout; UI reconnects via `SessionDialog` if session still valid
+- Auth: `main_page()` calls `GET /auth/config` to discover mode (none/password/jwt/external), routes to login dialogs or straight to sessions accordingly
+  - `none`: Go straight to session dialogs
+  - `password`: `PasswordProtected` gate using `CONFIG.ui.access_password`, then session dialogs
+  - `jwt`: `AuthLoginDialog`/`AuthRegisterDialog` first, token stored in `app.storage.user['phoebe_token']`, then session dialogs
+  - `external`: Token expected in `app.storage.user['phoebe_token']` (set by upstream), then session dialogs

@@ -9,19 +9,14 @@ class SessionInfo:
     Passive server session state. Server is the single source of truth.
     """
 
-    first_name: str = ""
-    last_name: str = ""
-    email: str = ""
     session_id: str | None = None
+    user_id: str | None = None
+    full_name: str = ""
     project_name: str = "Unnamed Project"
     created_at: float | None = None
     last_activity: float | None = None
     mem_used: float | None = None
     port: int | None = None
-
-    @property
-    def full_name(self) -> str:
-        return f'{self.first_name} {self.last_name}'.strip()
 
     @property
     def is_new_session(self) -> bool:
@@ -180,7 +175,7 @@ class StartSessionDialog(PhoebeDialog):
         """Create the welcome title."""
         with ui.column().classes('w-full mb-4') as block:
             ui.label('Welcome to PHOEBE Lab').classes('text-2xl font-bold mb-2')
-            ui.label('Please register below to begin').classes('text-gray-600')
+            ui.label('Please enter your project name below to begin').classes('text-gray-600')
         return block
 
     def create_content_block(self):
@@ -190,21 +185,6 @@ class StartSessionDialog(PhoebeDialog):
                 'System/Project Name',
                 placeholder='Enter a name for your project',
                 value='Unnamed Project'
-            ).classes('w-full').props('outlined')
-
-            self.first_name_input = ui.input(
-                'First Name',
-                placeholder='Enter your first name'
-            ).classes('w-full').props('outlined')
-
-            self.last_name_input = ui.input(
-                'Last Name',
-                placeholder='Enter your last name'
-            ).classes('w-full').props('outlined')
-
-            self.email_input = ui.input(
-                'Email (optional)',
-                placeholder='your.email@example.com'
             ).classes('w-full').props('outlined')
 
             self.error_label = ui.label('').classes('text-red-500 text-sm')
@@ -224,6 +204,13 @@ class StartSessionDialog(PhoebeDialog):
                     'Back',
                     on_click=self.on_back
                 ).classes('flex-1 bg-gray-600 text-white').props('size=lg')
+            else:
+                # Logout button if JWT auth (no back option, show logout instead)
+                self.logout_button = ui.button(
+                    'Logout',
+                    on_click=self.on_logout,
+                    icon='logout'
+                ).classes('flex-1 bg-red-600 text-white').props('size=lg')
 
         return block
 
@@ -232,23 +219,29 @@ class StartSessionDialog(PhoebeDialog):
         self.hide()
         self.context_data['session_dialog'].show()
 
+    def on_logout(self):
+        """Handle logout - clear token and return to login."""
+        # Clear the JWT token from browser storage
+        if 'phoebe_token' in app.storage.user:
+            app.storage.user.pop('phoebe_token')
+        
+        # Hide this dialog
+        self.hide()
+        
+        # Show auth login dialog if available (JWT mode), otherwise fall back to login_dialog
+        if 'auth_login' in self.context_data:
+            self.context_data['auth_login'].show()
+        elif 'login_dialog' in self.context_data:
+            self.context_data['login_dialog'].show()
+        else:
+            # Fallback: navigate to root which will restart auth flow
+            ui.navigate.to('/')
+        
+        ui.notify('You have been logged out.', type='info')
+
     async def validate_and_create(self):
         """Validate inputs and create new session."""
-        first_name = self.first_name_input.value.strip()
-        last_name = self.last_name_input.value.strip()
-        email = self.email_input.value.strip()
         project_name = self.project_name_input.value.strip() or 'Unnamed Project'
-
-        errors = []
-        if not first_name:
-            errors.append("First name is required")
-        if not last_name:
-            errors.append("Last name is required")
-
-        if errors:
-            self.error_label.text = "; ".join(errors)
-            self.error_label.visible = True
-            return
 
         # self.start_button.disable()
         self.start_button.props('loading')
@@ -258,10 +251,7 @@ class StartSessionDialog(PhoebeDialog):
         try:
             # Create session
             session_info = SessionInfo(
-                first_name=first_name,
-                last_name=last_name,
-                email=email,
-                project_name=project_name
+                project_name=project_name,
             )
 
             await self.on_session_activated(session_info=session_info, context_data=self.context_data)
@@ -390,15 +380,9 @@ class SessionManagerDialog(PhoebeDialog):
                 f"Project: {session.get('project_name', 'Unnamed Project')}"
             ).classes('text-sm text-gray-700 font-semibold')
 
-            first_name = session.get('user_first_name', '')
-            last_name = session.get('user_last_name', '')
-            if first_name or last_name:
-                owner_name = f'{first_name} {last_name}'.strip()
-                ui.label(f"Owner: {owner_name}").classes('text-sm text-gray-700')
-
-            email = session.get('user_email', '')
-            if email:
-                ui.label(f"Email: {email}").classes('text-sm text-gray-700')
+            full_name = session.get('full_name', '')
+            if full_name:
+                ui.label(f"Owner: {full_name}").classes('text-sm text-gray-700')
 
             created_at = session.get('created_at', 0)
             if created_at:
@@ -501,6 +485,173 @@ class SessionManagerDialog(PhoebeDialog):
 
         except Exception as e:
             ui.notify(f'Failed to delete session: {str(e)}', color='negative')
+
+
+class AuthLoginDialog(PhoebeDialog):
+    """Login dialog for JWT/password server auth modes."""
+
+    def __init__(self, client, on_authenticated):
+        """
+        Args:
+            client: PhoebeClient instance
+            on_authenticated: Callback after successful login
+        """
+        super().__init__(persistent=True)
+        self.client = client
+        self.on_authenticated = on_authenticated
+        self.create()
+
+    def create_title_block(self):
+        with ui.column().classes('w-full mb-4') as block:
+            ui.label('Welcome to PHOEBE Lab').classes('text-2xl font-bold mb-2')
+            ui.label('Sign in to continue').classes('text-gray-600')
+        return block
+
+    def create_content_block(self):
+        with ui.column().classes('w-full gap-4') as block:
+            self.email_input = ui.input(
+                'Email', placeholder='your.email@example.com'
+            ).classes('w-full').props('outlined')
+
+            self.password_input = ui.input(
+                'Password', password=True, password_toggle_button=True
+            ).classes('w-full').props('outlined')
+            self.password_input.on('keydown.enter', self.do_login)
+
+            self.error_label = ui.label('').classes('text-red-500 text-sm')
+            self.error_label.visible = False
+        return block
+
+    def create_buttons_block(self):
+        with ui.row().classes('w-full gap-3 mt-4') as block:
+            self.login_button = ui.button(
+                'Sign In', on_click=self.do_login
+            ).classes('flex-1 bg-blue-600 text-white').props('size=lg')
+
+            self.register_link = ui.button(
+                'Create Account', on_click=self.go_to_register
+            ).classes('flex-1').props('flat size=lg')
+        return block
+
+    async def do_login(self):
+        email = self.email_input.value.strip()
+        password = self.password_input.value
+
+        if not email or not password:
+            self.error_label.text = 'Email and password are required'
+            self.error_label.visible = True
+            return
+
+        self.login_button.props('loading')
+        try:
+            result = await run.io_bound(self.client.login, email, password)
+            # Persist token to browser storage for session survival
+            token = result.get('access_token')
+            if token:
+                app.storage.user['phoebe_token'] = token
+            self.hide()
+            await self.on_authenticated()
+        except Exception as e:
+            self.error_label.text = str(e)
+            self.error_label.visible = True
+        finally:
+            self.login_button.props(remove='loading')
+
+    def go_to_register(self):
+        self.hide()
+        self.context_data.get('register_dialog', self).show()
+
+
+class AuthRegisterDialog(PhoebeDialog):
+    """Registration dialog for JWT/password server auth modes."""
+
+    def __init__(self, client, on_authenticated):
+        super().__init__(persistent=True)
+        self.client = client
+        self.on_authenticated = on_authenticated
+        self.create()
+
+    def create_title_block(self):
+        with ui.column().classes('w-full mb-4') as block:
+            ui.label('Create Account').classes('text-2xl font-bold mb-2')
+            ui.label('Register to get started').classes('text-gray-600')
+        return block
+
+    def create_content_block(self):
+        with ui.column().classes('w-full gap-4') as block:
+            self.first_name_input = ui.input(
+                'First Name', placeholder='First name'
+            ).classes('w-full').props('outlined')
+
+            self.last_name_input = ui.input(
+                'Last Name', placeholder='Last name'
+            ).classes('w-full').props('outlined')
+
+            self.email_input = ui.input(
+                'Email', placeholder='your.email@example.com'
+            ).classes('w-full').props('outlined')
+
+            self.password_input = ui.input(
+                'Password', password=True, password_toggle_button=True
+            ).classes('w-full').props('outlined')
+            self.password_input.on('keydown.enter', self.do_register)
+
+            self.error_label = ui.label('').classes('text-red-500 text-sm')
+            self.error_label.visible = False
+        return block
+
+    def create_buttons_block(self):
+        with ui.row().classes('w-full gap-3 mt-4') as block:
+            self.register_button = ui.button(
+                'Register', on_click=self.do_register
+            ).classes('flex-1 bg-blue-600 text-white').props('size=lg')
+
+            self.login_link = ui.button(
+                'Sign In Instead', on_click=self.go_to_login
+            ).classes('flex-1').props('flat size=lg')
+        return block
+
+    async def do_register(self):
+        first = self.first_name_input.value.strip()
+        last = self.last_name_input.value.strip()
+        email = self.email_input.value.strip()
+        password = self.password_input.value
+
+        errors = []
+        if not first:
+            errors.append('First name is required')
+        if not last:
+            errors.append('Last name is required')
+        if not email:
+            errors.append('Email is required')
+        if not password:
+            errors.append('Password is required')
+
+        if errors:
+            self.error_label.text = '; '.join(errors)
+            self.error_label.visible = True
+            return
+
+        self.register_button.props('loading')
+        try:
+            result = await run.io_bound(
+                self.client.register, email, password, first, last
+            )
+            # Persist token to browser storage for session survival
+            token = result.get('access_token')
+            if token:
+                app.storage.user['phoebe_token'] = token
+            self.hide()
+            await self.on_authenticated()
+        except Exception as e:
+            self.error_label.text = str(e)
+            self.error_label.visible = True
+        finally:
+            self.register_button.props(remove='loading')
+
+    def go_to_login(self):
+        self.hide()
+        self.context_data.get('login_dialog', self).show()
 
 
 class PasswordProtected(PhoebeDialog):

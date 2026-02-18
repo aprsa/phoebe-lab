@@ -66,24 +66,18 @@ class ServerConfig:
 
 
 @dataclass(frozen=True)
-class AccessConfig:
-    password: str = ""
-    enabled: bool = False
-
-
-@dataclass(frozen=True)
 class UIConfig:
     host: str = "0.0.0.0"
     port: int = 80
     title: str = "PHOEBE Lab"
     reconnect_timeout: int = 300
     storage_secret: str = "phoebe-lab-secret-key-change-in-production"
+    access_password: str = ""  # Shared password for server auth mode=password
 
 
 @dataclass(frozen=True)
 class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
-    access: AccessConfig = field(default_factory=AccessConfig)
     ui: UIConfig = field(default_factory=UIConfig)
 
 
@@ -99,15 +93,13 @@ def _load_config() -> AppConfig:
             pass
 
     server_data = data.get("server", {})
-    access_data = data.get("access", {})
     ui_data = data.get("ui", {})
 
-    def get_args(config_cls, data):
-        return {k: v for k, v in data.items() if v is not None and k in config_cls.__dataclass_fields__}
+    def get_args(config_cls, section_data):
+        return {k: v for k, v in section_data.items() if v is not None and k in config_cls.__dataclass_fields__}
 
     return AppConfig(
         server=ServerConfig(**get_args(ServerConfig, server_data)),
-        access=AccessConfig(**get_args(AccessConfig, access_data)),
         ui=UIConfig(**get_args(UIConfig, ui_data)),
     )
 
