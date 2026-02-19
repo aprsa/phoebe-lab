@@ -11,6 +11,8 @@ services:
     volumes:
       - ./examples:/usr/share/phoebe-lab/examples:ro
       - ./config.toml:/etc/phoebe-lab/config.toml:ro
+    networks:
+      - phoebe-lab-net
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost"]
       interval: 30s
@@ -23,3 +25,9 @@ services:
           memory: 8G
         reservations:
           memory: 512M
+
+networks:
+  phoebe-lab-net:
+    name: phoebe-lab-net
+    driver: bridge
+    external: true
