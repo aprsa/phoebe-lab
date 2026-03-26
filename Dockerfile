@@ -12,9 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Upgrade pip
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Install phoebe-client from deps/ (copied by build-docker.sh)
-COPY deps/phoebe-client /tmp/phoebe-client
-RUN pip install --no-cache-dir /tmp/phoebe-client && rm -rf /tmp/phoebe-client
+# Install phoebe-client from GitHub
+RUN pip install --no-cache-dir git+https://github.com/aprsa/phoebe-client.git
 
 # Copy and install phoebe-lab
 COPY pyproject.toml README.md ./
