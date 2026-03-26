@@ -1,5 +1,6 @@
 import io
 import json
+from datetime import datetime
 from nicegui import ui, run
 from nicegui import app  # noqa: F401 - Required for storage_secret in ui.run()
 import numpy as np
@@ -849,6 +850,17 @@ class Dataset:
 
     def mount_dialog(self):
         """Mount the dataset creation/edit dialog."""
+        def format_file_size(size_bytes: int) -> str:
+            units = ['B', 'KB', 'MB', 'GB']
+            size = float(size_bytes)
+            for unit in units:
+                if size < 1024.0 or unit == units[-1]:
+                    if unit == 'B':
+                        return f'{int(size)} {unit}'
+                    return f'{size:.1f} {unit}'
+                size /= 1024.0
+            return f'{size_bytes} B'
+
         with ui.dialog() as self.dataset_dialog, ui.card().classes('w-[800px] h-[600px]'):
             self.dialog_title = ui.label('Add Dataset').classes('text-xl font-bold mb-4')
 
@@ -908,37 +920,44 @@ class Dataset:
                         example_files = []
 
                         if EXAMPLES_PATH.is_dir():
-                            for file_path in EXAMPLES_PATH.iterdir():
-                                if file_path.is_file():
+                            ignore = ['__init__.py', '__pycache__']
+                            for file_path in sorted(EXAMPLES_PATH.iterdir(), key=lambda path: path.name.lower()):
+                                if file_path.is_file() and file_path.name not in ignore:
+                                    file_stat = file_path.stat()
                                     example_files.append({
                                         'name': file_path.name,
                                         'path': str(file_path),
-                                        'description': '',
+                                        'size': format_file_size(file_stat.st_size),
+                                        'modified': datetime.fromtimestamp(file_stat.st_mtime).strftime('%Y-%m-%d %H:%M'),
                                     })
 
                         if example_files:
-                            example_cards = []
+                            self.example_list = ui.aggrid({
+                                'columnDefs': [
+                                    {'headerName': 'Filename:', 'field': 'filename', 'sortable': True},
+                                    {'headerName': 'Size:', 'field': 'size', 'sortable': True, 'type': 'numericColumn', 'cellClass': 'text-right'},
+                                    {'headerName': 'Modified:', 'field': 'modified', 'sortable': True},
+                                ],
+                                'rowData': [
+                                ],
+                                'rowSelection': 'single',
+                            })
 
-                            def toggle_card_selection(file_path, card_element):
-                                if self.data_file == file_path:
-                                    self.data_file = None
-                                    card_element.classes(remove='bg-blue-100 border-blue-500 border-2')
-                                    card_element.classes(add='bg-white border-gray-200')
-                                else:
-                                    for other_card in example_cards:
-                                        other_card.classes(remove='bg-blue-100 border-blue-500 border-2')
-                                        other_card.classes(add='bg-white border-gray-200')
-                                    self.data_file = file_path
-                                    card_element.classes(remove='bg-white border-gray-200')
-                                    card_element.classes(add='bg-blue-100 border-blue-500 border-2')
+                            for example_file in example_files:
+                                self.example_list.options['rowData'].append({
+                                    'filename': example_file['name'],
+                                    'size': example_file['size'],
+                                    'modified': example_file['modified'],
+                                })
+                            self.example_list.update()
 
-                            with ui.column().classes('w-full gap-2'):
-                                for file_info in example_files:
-                                    with ui.card().classes('cursor-pointer hover:bg-gray-50 p-3 bg-white border-gray-200 border') as card:
-                                        example_cards.append(card)
-                                        ui.label(file_info['name']).classes('font-bold')
-                                        ui.label(file_info['description']).classes('text-sm text-gray-600')
-                                        card.on('click', lambda fp=file_info['path'], c=card: toggle_card_selection(fp, c))
+                            def on_example_row_selected(event):
+                                if event.args and 'data' in event.args and 'filename' in event.args['data']:
+                                    self.data_file = str(EXAMPLES_PATH / event.args['data']['filename'])
+                                    self.data_content = None
+
+                            self.example_list.on('rowSelected', on_example_row_selected)
+
                         else:
                             ui.label('No example files found').classes('text-gray-500')
 
@@ -999,6 +1018,10 @@ class Dataset:
         # Clear file upload state
         self.data_file = None
         self.data_content = None
+
+        # Clear example file selection in grid so each dialog open starts unselected
+        if hasattr(self, 'example_list') and self.example_list is not None:
+            self.example_list.run_grid_method('deselectAll')
 
         self.dataset_dialog.open()
 
