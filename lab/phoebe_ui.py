@@ -354,6 +354,33 @@ class Dataset:
         self._editing_mode = False
         self._editing_dataset = None
 
+        # Passband options grouped by set from server.
+        self.passbands = self.client.get_passbands()['result']['grouped']
+
+    def _on_pbset_changed(self, _event=None):
+        """Handle passband set selection changes."""
+        pbset = self.widgets['dataset_passband_set'].value
+        pbnames = self.passbands.get(pbset, [])
+
+        self.widgets['dataset_passband_set'].value = pbset
+        self.widgets['dataset_passband_name'].options = {name: name for name in pbnames}
+        self.widgets['dataset_passband_name'].value = pbnames[0]
+
+    def _set_passband(self, pbset, pbname):
+        """Set the passband based on selected set and name."""
+        self.widgets['dataset_passband_set'].value = pbset
+        self.widgets['dataset_passband_name'].value = pbname
+
+    def _split_passband(self, passband: str) -> tuple[str, str]:
+        """Split a full passband string into set and name parts."""
+        pset, pname = passband.split(':', 1)
+        return pset, pname
+
+    def _get_passband(self) -> str:
+        pset = self.widgets['dataset_passband_set'].value
+        pname = self.widgets['dataset_passband_name'].value
+        return f'{pset}:{pname}'
+
     def add(self, **kwargs):
         """Add a dataset to both internal model and bundle."""
         kind = kwargs.get('kind', None)
@@ -701,7 +728,7 @@ class Dataset:
             'kind': kind,
             'dataset': self.widgets['dataset_label'].value,
             'component': self.widgets['dataset_component'].value if kind == 'rv' else 'binary',
-            'passband': self.widgets['dataset_passband'].value,
+            'passband': self._get_passband(),
             'n_points': int(self.widgets['dataset_n_points'].value),
             'phase_min': self.widgets['dataset_phase_min'].value,
             'phase_max': self.widgets['dataset_phase_max'].value,
@@ -761,7 +788,8 @@ class Dataset:
         # Populate all fields
         self.widgets['dataset_kind'].value = dataset_meta.get('kind')
         self.widgets['dataset_label'].value = dataset_meta.get('dataset')
-        self.widgets['dataset_passband'].value = dataset_meta.get('passband')
+        pset, pname = self._split_passband(dataset_meta.get('passband'))
+        self._set_passband(pbset=pset, pbname=pname)
         self.widgets['dataset_n_points'].value = dataset_meta.get('n_points')
         self.widgets['dataset_phase_min'].value = dataset_meta.get('phase_min')
         self.widgets['dataset_phase_max'].value = dataset_meta.get('phase_max')
@@ -884,10 +912,19 @@ class Dataset:
                     value='primary'
                 ).classes('w-full hidden')
 
-                self.widgets['dataset_passband'] = ui.select(
-                    options=['GoChile:R', 'GoChile:G', 'GoChile:B', 'GoChile:L', 'TESS:T', 'Kepler:mean', 'Gaia:BP', 'Gaia:RP', 'Gaia:G', 'Gaia:RVS', 'Johnson:V'],
-                    label='Passband',
-                    value='Johnson:V'
+                default_set, default_name = 'Johnson', 'V'
+
+                self.widgets['dataset_passband_set'] = ui.select(
+                    options={pbset: pbset for pbset in self.passbands.keys()},
+                    label='Passband Set',
+                    value=default_set
+                ).classes('w-full')
+                self.widgets['dataset_passband_set'].on('update:model-value', self._on_pbset_changed)
+
+                self.widgets['dataset_passband_name'] = ui.select(
+                    options={pbname: pbname for pbname in self.passbands[default_set]},
+                    label='Passband Name',
+                    value=default_name
                 ).classes('w-full')
 
                 # Phase parameters section
@@ -1006,7 +1043,8 @@ class Dataset:
         self.widgets['dataset_kind'].value = 'lc'
         self.widgets['dataset_label'].value = f'ds{len(self.datasets)+1:02d}'
         self.widgets['dataset_label'].enable()
-        self.widgets['dataset_passband'].value = 'Johnson:V'
+        default_set, default_name = 'Johnson', 'V'
+        self._set_passband(pbset=default_set, pbname=default_name)
         self.widgets['dataset_component'].value = 'primary'
         self.widgets['dataset_n_points'].value = 201
         self.widgets['dataset_phase_min'].value = -0.5
